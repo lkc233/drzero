@@ -377,15 +377,7 @@ class AsyncRolloutRequest(BaseModel):
         content: str,
     ) -> None:
         self.messages.append(Message(role="user", content=content))
-        messages = [*BASE_CHAT_HISTORY, self.messages[-1]]
-        tools = [tool.model_dump() for tool in self.tool_schemas] if self.tool_schemas else None
-
-        # We don't need to pass multi_modal_data here because we don't have any multi-modal data from Engine
-        # Inference, it is pure text.
-        content_ids = self._handle_apply_chat_template(
-            processing_class, messages, multi_modal_data={}, tools=tools, add_generation_prompt=False, tokenize=True
-        )[..., self.base_conv_wo_gen_prompt_end_pos :]
-        self._update_input_ids(processing_class, content_ids, attention_mask=True, loss_mask=False)
+        self._append_text_message_from_full_prompt(processing_class, loss_mask=False)
 
     def add_assistant_message(
         self,
@@ -394,16 +386,67 @@ class AsyncRolloutRequest(BaseModel):
         tool_calls: Optional[list[OpenAIFunctionToolCall]] = None,
     ) -> None:
         self.messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
+        self._append_text_message_from_full_prompt(processing_class, loss_mask=True)
 
-        messages = [*BASE_CHAT_HISTORY, self.messages[-1]]
+    def _remove_generation_prompt_suffix_if_exists(self) -> None:
+        """Keep input_ids aligned with finalized conversation before appending a new message."""
+        if self.generation_prompt_ids.shape[-1] == 0:
+            return
+        if self.input_ids.shape[-1] < self.generation_prompt_ids.shape[-1]:
+            return
+        if self.input_ids[..., -self.generation_prompt_ids.shape[-1] :].eq(self.generation_prompt_ids).all():
+            self.input_ids = self.input_ids[..., : -self.generation_prompt_ids.shape[-1]]
+            self.attention_mask = self.attention_mask[..., : -self.generation_prompt_ids.shape[-1]]
+            self.position_ids = self.position_ids[..., : -self.generation_prompt_ids.shape[-1]]
+            self.loss_mask = self.loss_mask[..., : -self.generation_prompt_ids.shape[-1]]
+
+    def _append_text_message_from_full_prompt(
+        self,
+        processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
+        loss_mask: bool,
+    ) -> None:
+        # `input_ids` may temporarily end with generation prompt ids after calling get_generation_prompt_ids().
+        # Remove them first, then append the exact delta from tokenizing the full conversation.
+        self._remove_generation_prompt_suffix_if_exists()
+
+        messages = [msg.model_dump() for msg in self.messages]
         tools = [tool.model_dump() for tool in self.tool_schemas] if self.tool_schemas else None
+        full_prompt_ids = self._handle_apply_chat_template(
+            processing_class,
+            messages,
+            multi_modal_data=self.multi_modal_data,
+            tools=tools,
+            add_generation_prompt=False,
+            tokenize=True,
+        )
+        if full_prompt_ids.shape[-1] < self.input_ids.shape[-1]:
+            raise ValueError(
+                f"Unexpected full_prompt_ids length {full_prompt_ids.shape[-1]} smaller than current input length "
+                f"{self.input_ids.shape[-1]} for request {self.request_id}"
+            )
 
-        # We don't need to pass multi_modal_data here because we don't have any multi-modal data from Engine
-        # Inference, it is pure text.
-        content_ids = self._handle_apply_chat_template(
-            processing_class, messages, multi_modal_data={}, tools=tools, add_generation_prompt=False, tokenize=True
-        )[..., self.base_conv_with_gen_prompt_end_pos :]
-        self._update_input_ids(processing_class, content_ids, attention_mask=True, loss_mask=True)
+        if self.input_ids.shape[-1] > 0 and not self.input_ids.eq(full_prompt_ids[..., : self.input_ids.shape[-1]]).all():
+            old_ids = self.input_ids.squeeze(0).tolist()
+            new_ids = full_prompt_ids.squeeze(0).tolist()
+            lcp = 0
+            for old_id, new_id in zip(old_ids, new_ids, strict=False):
+                if old_id != new_id:
+                    break
+                lcp += 1
+
+            logger.warning(
+                "Token prefix mismatch detected while appending message for request %s. "
+                "Realigning from token index %d.",
+                self.request_id,
+                lcp,
+            )
+            self.input_ids = self.input_ids[..., :lcp]
+            self.attention_mask = self.attention_mask[..., :lcp]
+            self.position_ids = self.position_ids[..., :lcp]
+            self.loss_mask = self.loss_mask[..., :lcp]
+
+        content_ids = full_prompt_ids[..., self.input_ids.shape[-1] :]
+        self._update_input_ids(processing_class, content_ids, attention_mask=True, loss_mask=loss_mask)
 
     def add_tool_response_messages(
         self,
