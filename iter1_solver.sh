@@ -36,7 +36,7 @@ VAL_DATA_DIR="./data/${SOLVER_NAME}"
 VAL_DATA="./data/test_1200.parquet"
 
 
-source activate llm;
+source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
 
 python search/retrieval_server.py \
     --index_path='./corpus/e5_Flat.index' \

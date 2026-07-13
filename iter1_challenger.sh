@@ -30,7 +30,7 @@ TRAIN_DATA="./data/zero_ratio${hop_ratio}.parquet"
 VAL_DATA="./data/test.parquet"
 
 
-source activate llm;
+source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
 
 python search/retrieval_server.py \
     --index_path='./corpus/e5_Flat.index' \

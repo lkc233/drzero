@@ -1,0 +1,66 @@
+[project]
+name = "drzero"
+version = "0.1.0"
+description = "Self-evolving search agents without training data"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "accelerate",
+    "aiohttp",
+    "beautifulsoup4",
+    "chardet",
+    "codetiming",
+    "compressed-tensors==0.9.3",
+    "datasets>=3,<4",
+    "dill",
+    "faiss-gpu-cu12==1.10.0",
+    "fastapi",
+    "google-api-python-client",
+    "huggingface-hub",
+    "hydra-core",
+    "latex2sympy2-extended",
+    "liger-kernel",
+    "math-verify",
+    "numpy<2.0",
+    "packaging>=20.0",
+    "pandas",
+    "peft",
+    "pyarrow>=19.0.0",
+    "pybind11",
+    "pylatexenc",
+    "ray[default]>=2.10",
+    "requests",
+    "sentence-transformers",
+    "sglang[openai,srt]==0.4.6.post5",
+    "tensordict>=0.8.0,<=0.9.1,!=0.9.0",
+    "torch==2.6.0",
+    "torch-memory-saver>=0.0.5",
+    "torchdata",
+    "torchvision==0.21.0",
+    "transformers==4.51.1",
+    "tqdm",
+    "uvicorn",
+    "wandb",
+]
+
+[project.optional-dependencies]
+training-kernels = [
+    "flash-attn==2.7.4.post1",
+]
+
+[dependency-groups]
+dev = [
+    "nvitop",
+    "pytest",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "I", "G"]
+ignore = ["F403", "F405", "E731", "B007", "UP032", "UP035", "UP045", "G004"]

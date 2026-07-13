@@ -41,7 +41,7 @@ VAL_DATA_DIR="./data/${SOLVER_NAME}"
 RESUME_PATH="./checkpoints/dr-zero/solver_iter${prev_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}_${model_name}/solver_iter${prev_iter}_hf"
 
 
-source activate llm;
+source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
 
 python search/retrieval_server.py \
     --index_path='./corpus/e5_Flat.index' \

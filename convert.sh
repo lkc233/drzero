@@ -1,7 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
-source activate llm;
+source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
 
 python -m verl.model_merger merge \
     --backend fsdp \

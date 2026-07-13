@@ -19,7 +19,18 @@ The core idea is to bootstrap a search agent from a base model (e.g., Qwen or Ll
 
 ### 1. Environment
 
-Ensure you have a Python environment with the necessary dependencies (PyTorch, transformers, faiss-gpu, verl==0.5.0, etc.). The rest of the dependencies can be found [here](https://github.com/volcengine/verl/blob/v0.5.0/requirements.txt) and [here](https://github.com/volcengine/verl/blob/v0.5.0/requirements_sglang.txt).
+Create the Python 3.10 environment and install the locked dependencies with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync
+source .venv/bin/activate
+```
+
+The default environment includes the CUDA 12 builds of PyTorch, SGLang, and FAISS used by the training and retrieval scripts. FlashAttention requires a local CUDA toolkit (`nvcc`); after making it available, install the optional training kernels with:
+
+```bash
+uv sync --extra training-kernels
+```
 
 ### 2. Search Engine
 

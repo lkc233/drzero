@@ -4,6 +4,7 @@
 *.pth
 tmp*
 .DS_Store
+.venv/
 
 /.ipynb_checkpoints/*
 .vscode/*
