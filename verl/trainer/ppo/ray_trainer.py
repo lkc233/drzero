@@ -994,6 +994,16 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        from verl.iteration.orchestrator import write_training_data_reference
+
+        write_training_data_reference(local_global_step_folder, self.config.data.train_files)
+
+        iteration_state_path = self.config.trainer.get("iteration_state_path")
+        if iteration_state_path:
+            from verl.iteration.orchestrator import write_checkpoint_state_reference
+
+            write_checkpoint_state_reference(local_global_step_folder, iteration_state_path)
+
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
@@ -1036,6 +1046,16 @@ class RayPPOTrainer:
 
         print(f"Setting global step to {self.global_steps}")
         print(f"Resuming from {global_step_folder}")
+
+        iteration_state_path = self.config.trainer.get("iteration_state_path")
+        if iteration_state_path:
+            from verl.iteration.orchestrator import (
+                validate_checkpoint_state_reference,
+                validate_training_data_reference,
+            )
+
+            validate_checkpoint_state_reference(global_step_folder, iteration_state_path)
+            validate_training_data_reference(global_step_folder, self.config.data.train_files)
 
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, "critic")

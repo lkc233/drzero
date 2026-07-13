@@ -1,0 +1,142 @@
+# Required environment variables intentionally keep machine/model paths and
+# launch recipes out of versioned iteration state. API keys remain referenced
+# only by the api_key_env fields in search_multiturn_grpo.yaml.
+state_path: ${oc.env:DRZERO_STATE_PATH}
+run_dir: ${oc.env:DRZERO_ITERATION_DIR}
+working_directory: ${oc.env:DRZERO_REPO_ROOT,.}
+
+stages:
+  proposer_train:
+    command:
+      - bash
+      - -lc
+      - ${oc.env:DRZERO_PROPOSER_COMMAND}
+    artifacts:
+      - ${oc.env:DRZERO_PROPOSER_CHECKPOINT}
+
+  generation_verify_split:
+    command:
+      - bash
+      - -lc
+      - ${oc.env:DRZERO_GENERATION_COMMAND}
+    artifacts:
+      - ${oc.env:DRZERO_CANDIDATES_PATH}
+      - ${oc.env:DRZERO_SOLVER_TRAIN_PATH}
+      - ${oc.env:DRZERO_KEEPOUT_PATH}
+      - ${oc.env:DRZERO_SPLIT_MANIFEST_PATH}
+      - ${oc.env:DRZERO_GENERATION_SUMMARY_PATH}
+
+  solver_train:
+    command:
+      - bash
+      - -lc
+      - ${oc.env:DRZERO_SOLVER_COMMAND}
+    artifacts:
+      - ${oc.env:DRZERO_SOLVER_CHECKPOINT}
+    checkpoint_dir: ${oc.env:DRZERO_SOLVER_CHECKPOINT}
+    train_data_path: ${oc.env:DRZERO_SOLVER_TRAIN_PATH}
+    keepout_path: ${oc.env:DRZERO_KEEPOUT_PATH}
+    split_manifest_path: ${oc.env:DRZERO_SPLIT_MANIFEST_PATH}
+
+  convert_solver:
+    command:
+      - bash
+      - -lc
+      - ${oc.env:DRZERO_CONVERT_COMMAND}
+    artifacts:
+      - ${oc.env:DRZERO_SOLVER_AFTER}
+    solver_after: ${oc.env:DRZERO_SOLVER_AFTER}
+
+  keepout_eval:
+    command:
+      - ${oc.env:DRZERO_PYTHON,.venv/bin/python}
+      - -m
+      - verl.iteration.cli
+      - keepout-eval
+      - --state
+      - ${oc.env:DRZERO_STATE_PATH}
+      - --config
+      - config/search_multiturn_grpo.yaml
+      - --keepout
+      - ${oc.env:DRZERO_KEEPOUT_PATH}
+      - --output
+      - ${oc.env:DRZERO_KEEPOUT_RESULTS_PATH}
+      - --summary
+      - ${oc.env:DRZERO_KEEPOUT_SUMMARY_PATH}
+    artifacts:
+      - ${oc.env:DRZERO_KEEPOUT_RESULTS_PATH}
+      - ${oc.env:DRZERO_KEEPOUT_SUMMARY_PATH}
+
+  trajectory_analysis:
+    command:
+      - ${oc.env:DRZERO_PYTHON,.venv/bin/python}
+      - -m
+      - verl.iteration.cli
+      - analyze
+      - --state
+      - ${oc.env:DRZERO_STATE_PATH}
+      - --config
+      - config/search_multiturn_grpo.yaml
+      - --results
+      - ${oc.env:DRZERO_KEEPOUT_RESULTS_PATH}
+      - --output
+      - ${oc.env:DRZERO_ANALYSIS_PATH}
+    artifacts:
+      - ${oc.env:DRZERO_ANALYSIS_PATH}
+
+  update_skills:
+    command:
+      - ${oc.env:DRZERO_PYTHON,.venv/bin/python}
+      - -m
+      - verl.iteration.cli
+      - update-skills
+      - --state
+      - ${oc.env:DRZERO_STATE_PATH}
+      - --config
+      - config/search_multiturn_grpo.yaml
+      - --candidates
+      - ${oc.env:DRZERO_CANDIDATES_PATH}
+      - --analysis
+      - ${oc.env:DRZERO_ANALYSIS_PATH}
+      - --generation-summary
+      - ${oc.env:DRZERO_GENERATION_SUMMARY_PATH}
+      - --keepout-summary
+      - ${oc.env:DRZERO_KEEPOUT_SUMMARY_PATH}
+      - --output
+      - ${oc.env:DRZERO_NEXT_SKILLS_PATH}
+    artifacts:
+      - ${oc.env:DRZERO_NEXT_SKILLS_PATH}
+
+  update_rubrics:
+    command:
+      - ${oc.env:DRZERO_PYTHON,.venv/bin/python}
+      - -m
+      - verl.iteration.cli
+      - update-rubrics
+      - --state
+      - ${oc.env:DRZERO_STATE_PATH}
+      - --config
+      - config/search_multiturn_grpo.yaml
+      - --candidates
+      - ${oc.env:DRZERO_CANDIDATES_PATH}
+      - --analysis
+      - ${oc.env:DRZERO_ANALYSIS_PATH}
+      - --generation-summary
+      - ${oc.env:DRZERO_GENERATION_SUMMARY_PATH}
+      - --keepout-summary
+      - ${oc.env:DRZERO_KEEPOUT_SUMMARY_PATH}
+      - --skills
+      - ${oc.env:DRZERO_NEXT_SKILLS_PATH}
+      - --output
+      - ${oc.env:DRZERO_NEXT_RUBRICS_PATH}
+    artifacts:
+      - ${oc.env:DRZERO_NEXT_RUBRICS_PATH}
+
+  finalize:
+    command: null
+    artifacts: []
+    next_state_path: ${oc.env:DRZERO_NEXT_STATE_PATH}
+    skills_path: ${oc.env:DRZERO_NEXT_SKILLS_PATH}
+    rubrics_path: ${oc.env:DRZERO_NEXT_RUBRICS_PATH}
+    proposer_after: ${oc.env:DRZERO_PROPOSER_AFTER}
+    solver_after: ${oc.env:DRZERO_SOLVER_AFTER}

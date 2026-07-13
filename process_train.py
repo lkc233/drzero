@@ -23,14 +23,13 @@ import tempfile
 
 import numpy as np
 import pandas as pd
-from transformers import AutoTokenizer
 from huggingface_hub import hf_hub_download
-from huggingface_hub.utils import EntryNotFoundError
+from transformers import AutoTokenizer
 
-from verl.utils.hdfs_io import copy, makedirs
 from search.index_builder import load_corpus
-from verl.prompts import *
-
+from verl.iteration.core import StateStore, initial_skills, stable_document_id
+from verl.prompts import build_challenger_prompt
+from verl.utils.hdfs_io import copy, makedirs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -41,7 +40,7 @@ HOP_RATIO = [4, 3, 2, 1]
 TOKENIZER = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
 
 
-def process_single_row(row, corpus_iter, current_split_name, row_index):
+def process_single_row(row, corpus_iter, current_split_name, row_index, skills):
     """
     Process a single row of data for SearchR1-like format.
 
@@ -56,16 +55,25 @@ def process_single_row(row, corpus_iter, current_split_name, row_index):
     # question = row.get("question", "")  # not used
 
     # Build prompt structure
-    doc = next(corpus_iter)['contents']
-    doc_title = doc.split("\n")[0]
-    doc_text = doc.split("\n")[1]
+    source_record = next(corpus_iter)
+    doc = source_record["contents"]
+    doc_title, _, doc_text = doc.partition("\n")
 
     raw_document = f"(Title: {doc_title})\n{doc_text}\n"
     encoded_document = TOKENIZER.encode(raw_document)[:256]
     decoded_document = TOKENIZER.decode(encoded_document)
+    source_id = next(
+        (
+            source_record[key]
+            for key in ("doc_id", "id", "_id")
+            if source_record.get(key) is not None
+        ),
+        None,
+    )
+    doc_id = stable_document_id(decoded_document, source_id=source_id)
 
     n_hop = np.random.choice(HOPS, size=1, p=np.array(HOP_RATIO)/sum(HOP_RATIO))[0]    
-    user_content = user_content_prefix.format(hops=n_hop, document=decoded_document)
+    user_content = build_challenger_prompt(hops=n_hop, document=decoded_document, skills=skills)
     prompt = [{"role": "user", "content": user_content}]
 
     # Process data source
@@ -85,10 +93,21 @@ def process_single_row(row, corpus_iter, current_split_name, row_index):
     # Build complete extra_info structure
     extra_info = {
         "index": row_index,
+        "doc_id": doc_id,
+        "hop_count": int(n_hop),
         "need_tools_kwargs": True,
         "split": current_split_name,
         "tools_kwargs": tools_kwargs,
     }
+    metadata = dict(row.get("metadata") or {})
+    metadata.update(
+        {
+            "doc_id": doc_id,
+            "source_document": decoded_document,
+            "source_id": source_id,
+            "hop_count": int(n_hop),
+        }
+    )
 
     return pd.Series(
         {
@@ -97,7 +116,7 @@ def process_single_row(row, corpus_iter, current_split_name, row_index):
             "ability": row.get("ability"),
             "reward_model": reward_model,
             "extra_info": extra_info,
-            "metadata": row.get("metadata"),
+            "metadata": metadata,
         }
     )
 
@@ -105,6 +124,7 @@ def process_single_row(row, corpus_iter, current_split_name, row_index):
 def main():
     local_save_dir = os.path.expanduser(args.local_dir)
     os.makedirs(local_save_dir, exist_ok=True)
+    skills = StateStore(args.iteration_state).load().skills if args.iteration_state else initial_skills()
 
     processed_files = []
     corpus_iter = iter(load_corpus(args.corpus_dir).shuffle(seed=42))
@@ -130,7 +150,13 @@ def main():
             logger.info(f"Loaded {len(df_raw)} rows from {parquet_filename}")
 
             def apply_process_row(row, split_name=split):
-                return process_single_row(row, corpus_iter, current_split_name=split_name, row_index=row.name)
+                return process_single_row(
+                    row,
+                    corpus_iter,
+                    current_split_name=split_name,
+                    row_index=row.name,
+                    skills=skills,
+                )
 
             df_processed = df_raw.apply(apply_process_row, axis=1)
 
@@ -172,8 +198,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--hdfs_dir", default=None, help="Optional HDFS directory to copy the Parquet files to.")
     parser.add_argument("--corpus_dir", default="./corpus/wiki-18.jsonl", help="Path to Wiki corpus data.")
+    parser.add_argument(
+        "--iteration_state",
+        default=None,
+        help="Optional state.json whose frozen skills are injected into proposer prompts.",
+    )
     args = parser.parse_args()
-
-    user_content_prefix = DEFAULT_CHALLENGER_PREFIX
 
     main()

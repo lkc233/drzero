@@ -144,7 +144,6 @@ class RLHFDataset(Dataset):
         if self.filter_overlong_prompts:
             tokenizer = self.tokenizer
             processor = self.processor
-            prompt_key = self.prompt_key
             image_key = self.image_key
             video_key = self.video_key
 
@@ -164,7 +163,8 @@ class RLHFDataset(Dataset):
             else:
 
                 def doc2len(doc) -> int:
-                    return len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
+                    messages = self._build_messages(doc)
+                    return len(tokenizer.apply_chat_template(messages, add_generation_prompt=True))
 
             dataframe = dataframe.filter(
                 lambda doc: doc2len(doc) <= self.max_prompt_length,

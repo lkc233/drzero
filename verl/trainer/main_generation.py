@@ -15,37 +15,49 @@
 Generate responses given a dataset of prompts
 """
 
+import asyncio
 import os
-import hydra
-import ray
+from collections import defaultdict
+from pathlib import Path
+from pprint import pprint
 
 os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
-# os.environ['TORCH_COMPILE_DISABLE'] = '1'
 
-from tqdm import trange
-from pprint import pprint
-from collections import defaultdict
-
-import torch
+import hydra
 import numpy as np
 import pandas as pd
+import ray
+import torch
 from omegaconf import OmegaConf
+from tqdm import trange
 
+import verl.utils.torch_functional as verl_F
 from verl import DataProto
+from verl.custom_reward.reward_function import compute_challenger_format_scores
+from verl.iteration.core import StateStore, atomic_write_json, candidate_rank_score
+from verl.iteration.generation import (
+    build_candidate,
+    build_generation_summary,
+    persist_candidates,
+    write_generation_datasets,
+)
+from verl.iteration.models import (
+    EndpointConfig,
+    OpenAICompatibleClient,
+    ProblemVerifier,
+    evaluate_rubrics,
+    rank_and_verify_candidates,
+    validate_model_reference,
+)
+from verl.prompts import DEFAULT_SOLVER_PREFIX, build_challenger_prompt
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
-from verl.workers.fsdp_workers import ActorRolloutRefWorker
-
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.hdfs_io import makedirs
-import verl.utils.torch_functional as verl_F
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
-
-from verl.prompts import *
-from verl.custom_reward.reward_function import compute_challenger_format_scores
+from verl.workers.fsdp_workers import ActorRolloutRefWorker
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
@@ -89,13 +101,56 @@ def main_task(config):
         partition = int(config.data.partition)
         assert 0 < partition <= 5
         start = partition_length * (partition - 1)
-        end = partition_length * (partition)
+        end = len(dataset) if partition == 5 else partition_length * partition
         dataset = dataset.iloc[start:end]
         print(f"Using partition {partition}/5, from {start} to {end}")
-    
-    chat_lst = dataset[config.data.prompt_key].tolist()
-    chat_lst = [chat.tolist() for chat in chat_lst]
-    all_hops = [int(x.split("_")[-1]) for x in dataset.data_source]
+
+    iteration_config = config.get("iteration", {})
+    state_path = iteration_config.get("state_path")
+    verify_config = config.get("verify", {})
+    verify_enabled = bool(verify_config.get("enabled", True))
+    if verify_enabled and not state_path:
+        raise ValueError("verify is enabled but iteration.state_path is not configured")
+    state = StateStore(state_path).load() if state_path else None
+    if state and verify_enabled:
+        configured_solver = str(verify_config.get("solver_model", {}).get("model_name"))
+        validate_model_reference(
+            configured_solver,
+            state.models.solver_before,
+            role="verify solver",
+        )
+
+    metadata_rows = [dict(item or {}) for item in dataset.metadata.tolist()]
+    if state:
+        chat_lst = []
+        all_hops = []
+        for metadata in metadata_rows:
+            required = {"doc_id", "source_document", "hop_count"}
+            missing = sorted(required - metadata.keys())
+            if missing:
+                raise ValueError(
+                    "legacy proposer data is missing structured metadata "
+                    f"{missing}; regenerate it with process_train.py"
+                )
+            chat_lst.append(
+                [
+                    {
+                        "role": "user",
+                        "content": build_challenger_prompt(
+                            hops=int(metadata["hop_count"]),
+                            document=metadata["source_document"],
+                            skills=state.skills,
+                        ),
+                    }
+                ]
+            )
+            all_hops.append(int(metadata["hop_count"]))
+    else:
+        chat_lst = [
+            chat.tolist() if hasattr(chat, "tolist") else list(chat)
+            for chat in dataset[config.data.prompt_key].tolist()
+        ]
+        all_hops = [int(x.split("_")[-1]) for x in dataset.data_source]
 
     resource_pool = RayResourcePool(
         process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes
@@ -120,7 +175,16 @@ def main_task(config):
     config_batch_size = config.data.batch_size
     num_batch = -(-total_samples // config_batch_size)
 
-    all_questions, all_answers, all_contexts = [], [], []
+    candidate_count = int(iteration_config.get("candidate_count_per_document", 5))
+    rollout_count = int(config.actor_rollout_ref.rollout.n)
+    if state and rollout_count != candidate_count:
+        raise ValueError(
+            f"generation must produce exactly {candidate_count} candidates per document, got rollout.n={rollout_count}"
+        )
+
+    candidate_groups = []
+    source_rows = []
+    legacy_questions, legacy_answers, legacy_contexts = [], [], []
     for batch_idx in trange(num_batch):
         gen_batch = defaultdict(list)
         batch_chat_lst = chat_lst[batch_idx * config_batch_size : (batch_idx + 1) * config_batch_size]
@@ -196,24 +260,142 @@ def main_task(config):
             format_scores, raw_qs, raw_ans = compute_challenger_format_scores(
                 raw_messages, responses, cur_hops, return_qa=True,
             )
-            sample_idx = np.argmax(format_scores)
+            document_offset = i // rollout_count
+            source_index = batch_idx * config_batch_size + document_offset
+            if state:
+                metadata = metadata_rows[source_index]
+                group = [
+                    build_candidate(
+                        state=state,
+                        metadata=metadata,
+                        hop_count=int(cur_hops[candidate_index]),
+                        trajectory=raw_messages[candidate_index],
+                        response=responses[candidate_index],
+                        question=raw_qs[candidate_index].strip(),
+                        reference_answer=raw_ans[candidate_index].strip(),
+                        format_score=float(format_scores[candidate_index]),
+                        generation_index=candidate_index,
+                    )
+                    for candidate_index in range(rollout_count)
+                ]
+                candidate_groups.append(group)
+                source_rows.append(dataset.iloc[source_index])
+            else:
+                sample_idx = int(np.argmax(format_scores))
+                legacy_questions.append(" ".join(raw_qs[sample_idx].split()[:50]))
+                legacy_answers.append(raw_ans[sample_idx])
+                legacy_contexts.append(raw_messages[sample_idx])
 
-            question = " ".join(raw_qs[sample_idx].split()[:50])
-            all_questions.append(question)
-            all_answers.append(raw_ans[sample_idx])
-            all_contexts.append(raw_messages[sample_idx])
-            print("Question: "+ question)
-            print("Answer: "+ raw_ans[sample_idx])
+    if not state:
+        for idx, (question, answer, context) in enumerate(
+            zip(legacy_questions, legacy_answers, legacy_contexts, strict=True)
+        ):
+            dataset.at[dataset.index[idx], "prompt"] = [
+                {"role": "user", "content": DEFAULT_SOLVER_PREFIX.format(question=question.strip())}
+            ]
+            reward_model = dict(dataset.iloc[idx].reward_model)
+            ground_truth = dict(reward_model["ground_truth"])
+            ground_truth["target"] = [answer]
+            reward_model["ground_truth"] = ground_truth
+            dataset.at[dataset.index[idx], "reward_model"] = reward_model
+            dataset.at[dataset.index[idx], "metadata"] = {"raw_context": context}
+        output_dir = os.path.dirname(config.data.output_path)
+        makedirs(output_dir, exist_ok=True)
+        dataset.to_parquet(config.data.output_path)
+        return
 
-    all_messages = [[{"role": "user", "content": DEFAULT_SOLVER_PREFIX.format(question=q.strip())}] for q in all_questions]
-    for idx, (message, gt, context) in enumerate(zip(all_messages, all_answers, all_contexts)):
-        dataset.iloc[idx].prompt = message
-        dataset.iloc[idx].reward_model['ground_truth']['target'] = [gt]
-        dataset.iloc[idx].metadata = {"raw_context": context}
-    
-    output_dir = os.path.dirname(config.data.output_path)
-    makedirs(output_dir, exist_ok=True)
-    dataset.to_parquet(config.data.output_path)
+    output_path = Path(config.data.output_path)
+    candidates_path = config.data.get("candidates_path") or str(output_path.with_suffix(".candidates.jsonl"))
+    keepout_path = config.data.get("keepout_path") or str(output_path.with_name(output_path.stem + "_keepout.parquet"))
+    split_manifest_path = config.data.get("split_manifest_path") or str(
+        output_path.with_name(output_path.stem + "_split_manifest.json")
+    )
+    all_candidates = [candidate for group in candidate_groups for candidate in group]
+    persist_candidates(candidates_path, all_candidates)
+
+    async def _rank_and_verify_all():
+        meta_config = EndpointConfig.model_validate(
+            OmegaConf.to_container(config.meta_model, resolve=True)
+        )
+        selected = []
+        selected_rows = []
+        async with OpenAICompatibleClient(meta_config) as meta_client:
+            if not verify_enabled:
+                for group_index, group in enumerate(candidate_groups):
+                    for candidate in group:
+                        try:
+                            scores, raw_output = await evaluate_rubrics(candidate, state.rubrics, meta_client)
+                            candidate.rubric_evaluation = scores
+                            candidate.rubric_raw_output = raw_output
+                            candidate.rank_score = candidate_rank_score(candidate.format_score, scores)
+                            candidate.status = "not_verified"
+                        except Exception as error:
+                            candidate.status = "rubric_error"
+                            candidate.rubric_failure = {
+                                "error_type": type(error).__name__,
+                                "reason": str(error),
+                                "details": getattr(error, "details", {}),
+                            }
+                            raise
+                        finally:
+                            persist_candidates(candidates_path, all_candidates)
+                    selected.append(max(group, key=lambda item: (item.rank_score, -item.generation_index)))
+                    selected_rows.append(source_rows[group_index])
+                return selected_rows, selected, {
+                    "meta": meta_client.metrics.model_dump(mode="json"),
+                    "solver": {},
+                }
+
+            solver_config = EndpointConfig.model_validate(
+                OmegaConf.to_container(config.verify.solver_model, resolve=True)
+            )
+            async with OpenAICompatibleClient(solver_config) as solver_client:
+                verifier = ProblemVerifier(
+                    solver_client,
+                    meta_client,
+                    samples=int(config.verify.solver_samples),
+                )
+                for group_index, group in enumerate(candidate_groups):
+                    try:
+                        winner, _, _ = await rank_and_verify_candidates(
+                            group,
+                            state.rubrics,
+                            meta_client,
+                            verifier,
+                        )
+                    finally:
+                        persist_candidates(candidates_path, all_candidates)
+                    if winner is not None:
+                        selected.append(winner)
+                        selected_rows.append(source_rows[group_index])
+            metrics = {
+                "meta": meta_client.metrics.model_dump(mode="json"),
+                "solver": solver_client.metrics.model_dump(mode="json"),
+            }
+        return selected_rows, selected, metrics
+
+    selected_source_rows, selected_candidates, model_call_metrics = asyncio.run(_rank_and_verify_all())
+    split_manifest = write_generation_datasets(
+        selected_source_rows,
+        selected_candidates,
+        train_path=str(output_path),
+        keepout_path=keepout_path,
+        split_manifest_path=split_manifest_path,
+        train_ratio=float(iteration_config.get("solver_train_ratio", 0.9)),
+        split_seed=int(iteration_config.get("split_seed", 42)),
+    )
+    summary_path = config.data.get("generation_summary_path") or str(
+        output_path.with_name(output_path.stem + "_generation_summary.json")
+    )
+    atomic_write_json(
+        summary_path,
+        build_generation_summary(
+            candidate_groups,
+            selected_candidates,
+            split_manifest,
+            model_call_metrics=model_call_metrics,
+        ),
+    )
 
 
 if __name__ == "__main__":

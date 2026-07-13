@@ -259,11 +259,22 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
     """
     from torch.utils.data import Dataset
 
+    from verl.iteration.dataset import should_use_proposer_iteration_prompt
     from verl.utils.dataset.rl_dataset import RLHFDataset
 
+    if should_use_proposer_iteration_prompt(
+        data_config,
+        is_train=is_train,
+        phase=os.getenv("DRZERO_ITERATION_PHASE"),
+    ):
+        if data_config.get("proposer_iteration_state_path") is None:
+            raise ValueError("proposer iteration prompts require data.proposer_iteration_state_path")
+        from verl.iteration.dataset import ProposerIterationDataset
+
+        dataset_cls = ProposerIterationDataset
     # Check if a custom dataset class is specified in the data configuration
     # and if the path to the custom class is provided
-    if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
+    elif "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
         # Dynamically load the custom dataset class
         dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
         # Verify that the custom dataset class inherits from torch.utils.data.Dataset

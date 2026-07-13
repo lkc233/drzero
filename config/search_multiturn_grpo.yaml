@@ -6,12 +6,72 @@ defaults:
   - ppo_trainer
   - _self_
 
+trainer:
+  iteration_state_path: ${iteration.state_path}
+
 data:
   max_prompt_length: 1536
   max_response_length: 2560
   train_batch_size: 256
   return_raw_chat: True
   shuffle: False
+  use_proposer_iteration_prompt: false
+  proposer_iteration_state_path: ${iteration.state_path}
+  candidates_path: null
+  keepout_path: null
+  split_manifest_path: null
+  generation_summary_path: null
+
+iteration:
+  state_path: ${oc.env:DRZERO_ITERATION_STATE,null}
+  candidate_count_per_document: 5
+  solver_train_ratio: 0.9
+  split_seed: 42
+
+verify:
+  enabled: true
+  solver_samples: 3
+  allow_search: false
+  solver_model:
+    model_name: ${oc.env:DRZERO_SOLVER_BEFORE,Qwen/Qwen2.5-3B-Instruct}
+    base_url: "http://127.0.0.1:8001"
+    api_key_env: null
+    timeout_seconds: 120
+    max_retries: 3
+    max_concurrency: 32
+
+keepout_eval:
+  retrieval_service_url: "http://127.0.0.1:8000/retrieve"
+  topk: 3
+  max_turns: 5
+  solver_model:
+    model_name: ${oc.env:DRZERO_SOLVER_AFTER,solver-after}
+    base_url: "http://127.0.0.1:8001"
+    api_key_env: null
+    timeout_seconds: 120
+    max_retries: 3
+    max_concurrency: 32
+
+trajectory_analysis:
+  chunk_size: 50
+
+proposer_reward:
+  format_weight: 0.5
+  difficulty_weight: 1.0
+  rubric_weight: 0.5
+
+dynamic_state:
+  max_skills: 12
+  max_rubrics: 12
+  max_retries: 3
+
+meta_model:
+  model_name: Qwen/Qwen2.5-72B-Instruct
+  base_url: "http://127.0.0.1:8002"
+  api_key_env: DRZERO_META_API_KEY
+  timeout_seconds: 120
+  max_retries: 3
+  max_concurrency: 32
 
 actor_rollout_ref:
   hybrid_engine: True
@@ -26,6 +86,9 @@ actor_rollout_ref:
 
 custom_reward_function:
   reward_kwargs:
-    model_name: Qwen/Qwen2.5-3B-Instruct
+    model_name: ${verify.solver_model.model_name}
     base_url: "http://127.0.0.1:8001"
     reward_rollout_n: 4
+    iteration_state_path: ${iteration.state_path}
+    proposer_reward: ${proposer_reward}
+    meta_model: ${meta_model}

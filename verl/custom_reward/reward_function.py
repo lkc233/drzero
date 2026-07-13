@@ -1,22 +1,43 @@
-import re
-import json
-import string
-import logging
-
-import os
-import torch
-import numpy as np
-from collections import defaultdict, Counter
-
 import asyncio
+import json
+import logging
+import os
+import re
+import string
+from collections import defaultdict
 from copy import deepcopy
-from verl import DataProto
-from verl.utils.model import compute_position_id_with_mask
+
+import numpy as np
+import torch
+
 import verl.utils.torch_functional as verl_F
-
+from verl import DataProto
 from verl.custom_reward.reward_rollout import MultiTurnRewardRollout
-from verl.prompts import *
-
+from verl.iteration.core import (
+    Candidate,
+    EvidenceItem,
+    StateStore,
+    extract_evidence_bundle,
+    normalize_trajectory,
+    proposer_reward_components,
+)
+from verl.iteration.models import (
+    EndpointConfig,
+    OpenAICompatibleClient,
+    evaluate_rubrics,
+    validate_model_reference,
+)
+from verl.prompts import (
+    ANSWER_PATTERN,
+    ASSISTANT_PATTERN,
+    DEFAULT_SOLVER_PREFIX,
+    QUESTION_PATTERN,
+    SOURCE_PATTERN,
+    THINK_PATTERN,
+    TOOL_CALL_PATTERN,
+    TOOL_RESPONSE_PATTERN,
+)
+from verl.utils.model import compute_position_id_with_mask
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -68,7 +89,7 @@ def count_valid_tool_calls(response):
                 and all(isinstance(q, str) for q in parsed["arguments"]["query_list"])
             ):
                 valid_count += 1
-        except:
+        except (json.JSONDecodeError, TypeError):
             continue
 
     return valid_count
@@ -96,7 +117,7 @@ def compute_challenger_format_scores(raw_messages, responses, hops, return_qa=Fa
         think_rewards.append(reward / max(1, len(messages)))
     
     raw_docs, tool_rewards = [], []
-    for messages, response, hop in zip(raw_messages, responses, hops):
+    for messages, response, hop in zip(raw_messages, responses, hops, strict=True):
         tool_calls = count_valid_tool_calls(response)
         doc = re.findall(SOURCE_PATTERN, messages, re.DOTALL)[0]
         doc_matches = re.findall(TOOL_RESPONSE_PATTERN, messages, re.DOTALL)
@@ -106,14 +127,14 @@ def compute_challenger_format_scores(raw_messages, responses, hops, return_qa=Fa
             reward = min((1 + tool_calls) / hop, 1.0)
             try:
                 doc += "\n\n" + "\n\n".join([json.loads(x)["result"] for x in doc_matches])
-            except:
+            except (json.JSONDecodeError, KeyError, TypeError):
                 logger.error(f"Error parsing tool response: {doc_matches}")
 
         raw_docs.append(doc)
         tool_rewards.append(reward)
 
     raw_ans, ans_rewards = [], []
-    for doc, text in zip(raw_docs, responses):
+    for doc, text in zip(raw_docs, responses, strict=True):
         ans_matches = re.findall(ANSWER_PATTERN, text, re.DOTALL)
         ans = ans_matches[-1].strip() if ans_matches else ""
         raw_ans.append(ans)
@@ -133,8 +154,20 @@ def compute_challenger_format_scores(raw_messages, responses, hops, return_qa=Fa
         q_matches = re.findall(QUESTION_PATTERN, text, re.DOTALL)
         raw_qs.append(q_matches[-1].strip() if q_matches else "")
 
-    integrity_rewards = [len(q) > 0 and len(a) > 0 and normalize_answer(a) not in normalize_answer(q) for q, a in zip(raw_qs, raw_ans)]
-    final_scores = [sum([1, f, t, a]) / 4 if i else 0 for i, f, t, a in zip(integrity_rewards, think_rewards, tool_rewards, ans_rewards)]
+    integrity_rewards = [
+        len(q) > 0 and len(a) > 0 and normalize_answer(a) not in normalize_answer(q)
+        for q, a in zip(raw_qs, raw_ans, strict=True)
+    ]
+    final_scores = [
+        sum([1, think_reward, tool_reward, answer_reward]) / 4 if integrity_reward else 0
+        for integrity_reward, think_reward, tool_reward, answer_reward in zip(
+            integrity_rewards,
+            think_rewards,
+            tool_rewards,
+            ans_rewards,
+            strict=True,
+        )
+    ]
     # print(
     #     f"Think rewards: Avg {np.mean(think_rewards)}, Max {np.max(think_rewards)}\n"
     #     f"Tool rewards: Avg {np.mean(tool_rewards)}, Max {np.max(tool_rewards)}\n"
@@ -172,7 +205,7 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
     )
 
     gen_batch_ids, gen_batch = [], defaultdict(list)
-    for idx, (s, q, a) in enumerate(zip(format_scores, raw_qs, raw_ans)):
+    for idx, (s, q, a) in enumerate(zip(format_scores, raw_qs, raw_ans, strict=True)):
         if s > 0:
             gen_batch_ids.append(idx)
             row_dict, messages = {}, [
@@ -219,61 +252,151 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
             for key, value in row_dict.items():
                 gen_batch[key].append(value)
 
-    if len(gen_batch_ids) == 0:
-        return format_scores
-
-    for key in gen_batch:
-        if isinstance(gen_batch[key][0], torch.Tensor):
-            gen_batch[key] = torch.stack(gen_batch[key])
-        else:
-            gen_batch[key] = np.array(gen_batch[key])
-
     group_size = kwargs["reward_rollout_n"]
-    gen_batch = DataProto.from_single_dict(gen_batch)
-    gen_batch = gen_batch.repeat(repeat_times=group_size, interleave=True)
-
-    async def _compute_with_rollout():
-        async with MultiTurnRewardRollout(
-            config=rollout_config,
-            processing_class=processing_class,
-            model_name=kwargs["model_name"],
-            base_url=kwargs["base_url"],
-        ) as reward_rollout:
-            gen_batch_output = await reward_rollout.generate_sequences(gen_batch)
-            return gen_batch_output
-
     loop = asyncio.get_event_loop()
-    outputs = loop.run_until_complete(_compute_with_rollout())
-
-    extracted_preds = []
-    last_turn_responses = [
-        x["messages"][-1].content for x in outputs.non_tensor_batch["messages"]
-    ]
-    for raw_response in last_turn_responses:
-        extracted = re.findall(ANSWER_PATTERN, raw_response, re.DOTALL)
-        if len(extracted) > 0:
-            extracted_preds.append(extracted[-1].strip())
-        else:
-            extracted_preds.append(raw_response.strip())
-
     solver_scores = []
-    grouped_preds = [
-        extracted_preds[i:i + group_size] for i in range(0, len(extracted_preds), group_size)
+    grouped_preds = []
+    if gen_batch_ids:
+        for key in gen_batch:
+            if isinstance(gen_batch[key][0], torch.Tensor):
+                gen_batch[key] = torch.stack(gen_batch[key])
+            else:
+                gen_batch[key] = np.array(gen_batch[key])
+
+        gen_batch = DataProto.from_single_dict(gen_batch)
+        gen_batch = gen_batch.repeat(repeat_times=group_size, interleave=True)
+
+        async def _compute_with_rollout():
+            async with MultiTurnRewardRollout(
+                config=rollout_config,
+                processing_class=processing_class,
+                model_name=kwargs["model_name"],
+                base_url=kwargs["base_url"],
+            ) as reward_rollout:
+                gen_batch_output = await reward_rollout.generate_sequences(gen_batch)
+                return gen_batch_output
+
+        outputs = loop.run_until_complete(_compute_with_rollout())
+        extracted_preds = []
+        last_turn_responses = [
+            x["messages"][-1].content for x in outputs.non_tensor_batch["messages"]
+        ]
+        for raw_response in last_turn_responses:
+            extracted = re.findall(ANSWER_PATTERN, raw_response, re.DOTALL)
+            if len(extracted) > 0:
+                extracted_preds.append(extracted[-1].strip())
+            else:
+                extracted_preds.append(raw_response.strip())
+
+        grouped_preds = [
+            extracted_preds[i:i + group_size] for i in range(0, len(extracted_preds), group_size)
+        ]
+        ground_truths = [x for idx, x in enumerate(raw_ans) if idx in gen_batch_ids]
+        for preds, gt in zip(grouped_preds, ground_truths, strict=True):
+            em_scores = [em_check(pred, gt) for pred in preds]
+            solver_scores.append(compute_difficulty_score(em_scores))
+
+    difficulty_scores = [0.0] * len(format_scores)
+    for idx, score in zip(gen_batch_ids, solver_scores, strict=True):
+        difficulty_scores[idx] = score
+
+    reward_config = kwargs.get("proposer_reward", {})
+    format_weight = float(reward_config.get("format_weight", 0.5))
+    difficulty_weight = float(reward_config.get("difficulty_weight", 1.0))
+    rubric_weight = float(reward_config.get("rubric_weight", 0.0))
+    rubric_evaluations = [[] for _ in format_scores]
+
+    if rubric_weight:
+        iteration_state_path = kwargs.get("iteration_state_path")
+        meta_model_config = kwargs.get("meta_model")
+        if not iteration_state_path or not meta_model_config:
+            raise ValueError("rubric reward requires iteration_state_path and meta_model configuration")
+        state = StateStore(iteration_state_path).load()
+        validate_model_reference(
+            kwargs["model_name"],
+            state.models.solver_before,
+            role="reward rollout solver",
+        )
+        endpoint_config = EndpointConfig.model_validate(dict(meta_model_config))
+        candidates = []
+        for idx, (message, response, hop, question, answer, format_score) in enumerate(
+            zip(raw_messages, responses, hops, raw_qs, raw_ans, format_scores, strict=True)
+        ):
+            source_matches = re.findall(SOURCE_PATTERN, message, re.DOTALL)
+            if not source_matches:
+                raise ValueError("proposer reward input is missing the source document")
+            source_document = source_matches[0].strip()
+            trajectory_text = message
+            try:
+                trajectory, evidence = extract_evidence_bundle(
+                    source_document,
+                    trajectory_text,
+                    hop_count=hop,
+                )
+            except ValueError:
+                trajectory = normalize_trajectory(trajectory_text)
+                evidence = [
+                    EvidenceItem(
+                        evidence_id="evidence-0",
+                        kind="seed_document",
+                        content=source_document,
+                        source="seed_document",
+                        trajectory_index=0,
+                    )
+                ]
+            candidates.append(
+                Candidate(
+                    candidate_id=f"reward-{idx}",
+                    iteration=state.iteration,
+                    doc_id=f"reward-{idx}",
+                    hop_count=hop,
+                    source_document=source_document,
+                    proposer_trajectory=trajectory,
+                    evidence_bundle=evidence,
+                    question=question,
+                    reference_answer=answer,
+                    format_score=float(format_score),
+                    generation_index=idx,
+                )
+            )
+
+        async def _compute_rubric_evaluations():
+            async with OpenAICompatibleClient(endpoint_config) as meta_client:
+                return await asyncio.gather(
+                    *(evaluate_rubrics(candidate, state.rubrics, meta_client) for candidate in candidates)
+                )
+
+        rubric_outputs = loop.run_until_complete(_compute_rubric_evaluations())
+        rubric_evaluations = [evaluations for evaluations, _ in rubric_outputs]
+
+    final_scores = [
+        proposer_reward_components(
+            float(format_score),
+            float(difficulty_score),
+            evaluations,
+            format_weight=format_weight,
+            difficulty_weight=difficulty_weight,
+            rubric_weight=rubric_weight,
+        )
+        for format_score, difficulty_score, evaluations in zip(
+            format_scores,
+            difficulty_scores,
+            rubric_evaluations,
+            strict=True,
+        )
     ]
-    ground_truths = [x for idx, x in enumerate(raw_ans) if idx in gen_batch_ids]
-    for preds, gt in zip(grouped_preds, ground_truths):
-        em_scores = [em_check(pred, gt) for pred in preds]
-        solver_scores.append(compute_difficulty_score(em_scores))
 
-    final_scores = [0.5 * x for x in format_scores]
-    for idx, score in zip(gen_batch_ids, solver_scores):
-        final_scores[idx] += score
-
+    example_idx = gen_batch_ids[0] if gen_batch_ids else 0
+    example_solver_responses = grouped_preds[0] if grouped_preds else []
     print(
         f"🚀 Raw format rewards: Avg {np.mean(format_scores)}, Max {np.max(format_scores)}\n"
-        f"🚀 Final rewards: Avg {np.mean(final_scores)}, Max {np.max(final_scores)}\n"
-        f"🧑‍🏫 Challenger question: {raw_qs[gen_batch_ids[0]]}\n"
-        f"🧑‍🎓 Challenger answer: {raw_ans[gen_batch_ids[0]]}\n"
-        f"🙋‍♂️ Solver responses: {grouped_preds[0]}"
+        f"🚀 Difficulty rewards: Avg {np.mean(difficulty_scores)}, Max {np.max(difficulty_scores)}\n"
+        f"🚀 Rubric rewards: Avg {np.mean([item['rubric_score'] for item in final_scores])}, "
+        f"Max {np.max([item['rubric_score'] for item in final_scores])}\n"
+        f"🚀 Final rewards: Avg {np.mean([item['score'] for item in final_scores])}, "
+        f"Max {np.max([item['score'] for item in final_scores])}\n"
+        f"🧑‍🏫 Challenger question: {raw_qs[example_idx]}\n"
+        f"🧑‍🎓 Challenger answer: {raw_ans[example_idx]}\n"
+        f"🙋‍♂️ Solver responses: {example_solver_responses}"
     )
     return final_scores
