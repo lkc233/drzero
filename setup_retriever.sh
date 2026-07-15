@@ -24,8 +24,9 @@ set -euo pipefail
 # --------------------------------------------------------------------------- #
 # Configuration (override any of these via environment variables)
 # --------------------------------------------------------------------------- #
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_URL="${REPO_URL:-https://github.com/PeterGriffinJin/Search-R1.git}"
-REPO_DIR="${REPO_DIR:-$HOME/Search-R1}"          # where to clone Search-R1
+REPO_DIR="${REPO_DIR:-$SCRIPT_DIR/Search-R1}"    # kept beside this setup script
 RETRIEVER_VENV_DIR="${RETRIEVER_VENV_DIR:-$REPO_DIR/.venv-retriever}" # separate from Dr. Zero's .venv
 DATA_DIR="${DATA_DIR:-$REPO_DIR/retriever/data}" # where to store index/corpus
 
