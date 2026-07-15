@@ -1,0 +1,12 @@
+[project]
+name = "drzero-qwen36-judge"
+version = "0.1.0"
+description = "Isolated SGLang serving environment for the Dr. Zero Qwen3.6 judge and updater"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "huggingface-hub",
+    "sglang",
+]
+
+[tool.uv]
+package = false

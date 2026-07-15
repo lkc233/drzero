@@ -7,6 +7,7 @@ tmp*
 .DS_Store
 .venv/
 .venv-retriever/
+.venv-qwen36-judge/
 /.cache/
 /Search-R1/
 
