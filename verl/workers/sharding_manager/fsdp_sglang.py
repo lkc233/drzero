@@ -15,6 +15,8 @@
 # limitations under the License.
 
 import asyncio
+
+from verl.utils.asyncio_utils import get_or_create_event_loop
 import logging
 import os
 
@@ -106,12 +108,12 @@ class FSDPSGLangShardingManager(BaseShardingManager):
     def __enter__(self):
         self.timing = {}
         with simple_timer("reshard", self.timing):
-            loop = asyncio.get_event_loop()
+            loop = get_or_create_event_loop()
             loop.run_until_complete(self.wake_up())
 
     @GPUMemoryLogger(role="FSDPSGLangShardingManager exit", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
-        loop = asyncio.get_event_loop()
+        loop = get_or_create_event_loop()
         loop.run_until_complete(self.sleep())
 
     async def update_weights(self, params):

@@ -2,6 +2,7 @@
 *.p
 *.pt
 *.pth
+*.log
 tmp*
 .DS_Store
 .venv/

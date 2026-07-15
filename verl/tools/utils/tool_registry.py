@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import asyncio
+
+from verl.utils.asyncio_utils import get_or_create_event_loop
 import importlib
 import logging
 import os
@@ -99,7 +101,7 @@ def initialize_tools_from_config(tools_config_file):
                 )
                 tool_list.append(tool)
             case ToolType.MCP:
-                loop = asyncio.get_event_loop()
+                loop = get_or_create_event_loop()
                 mcp_tools = loop.run_until_complete(initialize_mcp_tool(tool_cls, tool_config))
                 tool_list.extend(mcp_tools)
             case _:

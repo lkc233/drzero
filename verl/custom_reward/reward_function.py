@@ -1,4 +1,6 @@
 import asyncio
+
+from verl.utils.asyncio_utils import get_or_create_event_loop
 import json
 import logging
 import os
@@ -253,7 +255,7 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
                 gen_batch[key].append(value)
 
     group_size = kwargs["reward_rollout_n"]
-    loop = asyncio.get_event_loop()
+    loop = get_or_create_event_loop()
     solver_scores = []
     grouped_preds = []
     if gen_batch_ids:

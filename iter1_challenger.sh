@@ -3,8 +3,27 @@
 
 set -x
 
-kill -9 $(lsof -t -i :8000);
-kill -9 $(lsof -t -i :8001);
+# --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
+export CC=/usr/bin/gcc
+export CXX=/usr/bin/g++
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export HYDRA_FULL_ERROR=1
+
+source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
+# Put the active env's CUDA libs on the linker path (conda first, uv .venv fallback).
+export LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LD_LIBRARY_PATH}"
+# The venv uses system python3.10 without dev headers; Triton/sglang JIT-compile at
+# runtime and need Python.h. Borrow ABI-compatible 3.10 headers from miniforge.
+if [ ! -f "/usr/include/python3.10/Python.h" ]; then
+    export CPATH="/home/luokc/miniforge3/include/python3.10:${CPATH}"
+fi
+
+# NOTE: the retriever is remote (see config/search_tool_config.yaml ->
+# http://222.29.51.205:8020/retrieve); we do NOT launch a local retrieval server.
+# We reuse the base-model sglang on :8001 as the rubric-reward judge, so do NOT kill
+# :8000 (that port belongs to the standalone judge from serve_vllm.sh, if running).
+kill -9 $(lsof -t -i :8001) 2>/dev/null;
 
 tp=2
 dp=4
@@ -17,28 +36,34 @@ if [ $# -ge 1 ]; then
     shift
 fi
 
+# Log to logs/ like drzero_v0
+LOG_DIR="$(pwd)/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/iter1_challenger_ratio${hop_ratio}_$(date +%Y%m%d_%H%M%S).log"
+
 algorithm=grpo_batch
 grpo_group_size=1
 reward_group_size=5
-model=Qwen/Qwen2.5-3B-Instruct
+model=Qwen/Qwen3-4B-Instruct-2507
 model_name=$(basename "$model" | tr '[:upper:]' '[:lower:]')
 
-CONFIG_PATH="./config"
+# Hydra resolves a relative --config-path against verl/trainer/, so use an absolute path.
+CONFIG_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config"
 TOOL_CONFIG="$CONFIG_PATH/search_tool_config.yaml"
 
 TRAIN_DATA="./data/zero_ratio${hop_ratio}.parquet"
 VAL_DATA="./data/test.parquet"
 
 
-source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
-
-python search/retrieval_server.py \
-    --index_path='./corpus/e5_Flat.index' \
-    --corpus_path='./corpus/wiki-18.jsonl' \
-    --retriever_model='intfloat/e5-base-v2' \
-    --retriever_name='e5' \
-    --faiss_gpu \
-    --topk 3 &
+# --- Dr.Zero iteration state (frozen skills/rubrics) for the rubric reward ---
+# The rubric reward uses an untrained Qwen3-4B as the Meta/Judge model. We reuse the
+# base-model sglang served on :8001 below, so no separate judge server is required.
+STATE="./iterations/iter_1/state.json"
+export DRZERO_ITERATION_STATE="$STATE"
+if [ ! -f "$STATE" ]; then
+    python -m verl.iteration.cli init-state \
+        --state "$STATE" --iteration 1 --proposer "$model" --solver "$model"
+fi
 
 python -m sglang.launch_server \
     --model=${model} \
@@ -50,6 +75,8 @@ python -m sglang.launch_server \
     --log-level=error &
 
 sleep 30
+
+echo "Logging to: $LOG_FILE"
 
 python -m verl.trainer.main_ppo \
     --config-path="$CONFIG_PATH" \
@@ -83,12 +110,17 @@ python -m verl.trainer.main_ppo \
     custom_reward_function.reward_kwargs.model_name=${model} \
     custom_reward_function.reward_kwargs.base_url="http://127.0.0.1:8001" \
     custom_reward_function.reward_kwargs.reward_rollout_n=${reward_group_size} \
+    iteration.state_path="$STATE" \
+    meta_model.base_url="http://127.0.0.1:8001" \
+    meta_model.model_name=${model} \
+    meta_model.api_key_env=null \
     trainer.logger='["wandb", "console"]' \
     trainer.project_name="dr-zero" \
     trainer.experiment_name="challenger_iter1_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}" \
     trainer.n_gpus_per_node=${gpus} \
     trainer.nnodes=1 \
-    trainer.save_freq=25 \
+    trainer.save_freq=50 \
     trainer.test_freq=-1 \
     trainer.val_before_train=False \
-    trainer.total_epochs=1 $@
+    trainer.total_epochs=1 \
+    trainer.total_training_steps=50 $@ > "$LOG_FILE" 2>&1

@@ -10,7 +10,12 @@ trainer:
   iteration_state_path: ${iteration.state_path}
 
 data:
-  max_prompt_length: 1536
+  # 2048 (not 1536): proposer prompts are built to fit 1536 WITHOUT tools, but sglang
+  # re-applies the chat template WITH the search tool schema at rollout, pushing some
+  # prompts past 1536. schemas.py does not truncate (only warns), so an over-length
+  # prompt makes per-DP-worker prompt tensors differ and DataProto.concat fails. The
+  # tool schema adds ~40 tokens, so 2048 leaves ample headroom and keeps padding uniform.
+  max_prompt_length: 2048
   max_response_length: 2560
   train_batch_size: 256
   return_raw_chat: True
@@ -32,8 +37,10 @@ verify:
   enabled: true
   solver_samples: 3
   allow_search: false
+  # Verifier (answer sampling) is the round-start solver being trained; do not point
+  # this at a fixed auxiliary model.
   solver_model:
-    model_name: ${oc.env:DRZERO_SOLVER_BEFORE,Qwen/Qwen2.5-3B-Instruct}
+    model_name: ${oc.env:DRZERO_SOLVER_BEFORE,Qwen/Qwen3-4B-Instruct-2507}
     base_url: "http://127.0.0.1:8001"
     api_key_env: null
     timeout_seconds: 120
@@ -41,7 +48,7 @@ verify:
     max_concurrency: 32
 
 keepout_eval:
-  retrieval_service_url: "http://127.0.0.1:8000/retrieve"
+  retrieval_service_url: "http://222.29.51.205:8020/retrieve"
   topk: 3
   max_turns: 5
   solver_model:
@@ -65,10 +72,17 @@ dynamic_state:
   max_rubrics: 12
   max_retries: 3
 
+# Shared Meta/Judge model for verify judge, rubric scoring, keepout judge, trajectory
+# analysis, and the skills/rubrics updaters. Untrained Qwen3-4B-Instruct-2507.
+# Default endpoint targets the standalone judge served by serve_vllm.sh on :8000 (TP8),
+# used by the standalone pipeline stages (keepout_eval / trajectory_analysis /
+# update_skills / update_rubrics) that run when the training GPUs are free.
+# Concurrent stages (challenger rubric reward, gen_data verify) override this to the
+# co-located sglang on :8001 so they don't fight the training job for GPU memory.
 meta_model:
-  model_name: Qwen/Qwen2.5-72B-Instruct
-  base_url: "http://127.0.0.1:8002"
-  api_key_env: DRZERO_META_API_KEY
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  base_url: "http://127.0.0.1:8000"
+  api_key_env: null
   timeout_seconds: 120
   max_retries: 3
   max_concurrency: 32

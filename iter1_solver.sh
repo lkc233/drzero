@@ -3,7 +3,23 @@
 
 set -x
 
-kill -9 $(lsof -t -i :8000);
+# --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
+export CC=/usr/bin/gcc
+export CXX=/usr/bin/g++
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export HYDRA_FULL_ERROR=1
+
+source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
+export LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LD_LIBRARY_PATH}"
+# The venv uses system python3.10 without dev headers; Triton/sglang JIT-compile at
+# runtime and need Python.h. Borrow ABI-compatible 3.10 headers from miniforge.
+if [ ! -f "/usr/include/python3.10/Python.h" ]; then
+    export CPATH="/home/luokc/miniforge3/include/python3.10:${CPATH}"
+fi
+
+# Retriever is remote (config/search_tool_config.yaml); no local retrieval server.
+kill -9 $(lsof -t -i :8001) 2>/dev/null;
 
 tp=2
 dp=4
@@ -22,10 +38,11 @@ fi
 
 algorithm=grpo
 grpo_group_size=5
-model=Qwen/Qwen2.5-3B-Instruct
+model=Qwen/Qwen3-4B-Instruct-2507
 model_name=$(basename "$model" | tr '[:upper:]' '[:lower:]')
 
-CONFIG_PATH="./config"
+# Hydra resolves a relative --config-path against verl/trainer/, so use an absolute path.
+CONFIG_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config"
 TOOL_CONFIG="$CONFIG_PATH/search_tool_config.yaml"
 
 CHALLENGER_NAME="challenger_iter1_ratio${hop_ratio}_${challenger_algorithm}_group${challenger_grpo_group_size}-${challenger_reward_group_size}_${model_name}"
@@ -33,18 +50,10 @@ SOLVER_NAME="solver_iter1_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}
 
 TRAIN_DATA="./data/zero_${CHALLENGER_NAME}.parquet"
 VAL_DATA_DIR="./data/${SOLVER_NAME}"
-VAL_DATA="./data/test_1200.parquet"
-
-
-source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
-
-python search/retrieval_server.py \
-    --index_path='./corpus/e5_Flat.index' \
-    --corpus_path='./corpus/wiki-18.jsonl' \
-    --retriever_model='intfloat/e5-base-v2' \
-    --retriever_name='e5' \
-    --faiss_gpu \
-    --topk 3 &
+VAL_DATA="./data/test_sampled.parquet"
+if [ ! -f "$VAL_DATA" ]; then
+    VAL_DATA="./data/test.parquet"
+fi
 
 python -m verl.trainer.main_ppo \
     --config-path="$CONFIG_PATH" \

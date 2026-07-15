@@ -1,0 +1,74 @@
+{
+  "artifacts": {},
+  "config_snapshot": {},
+  "created_at": "2026-07-14T22:47:10.551765+00:00",
+  "iteration": 1,
+  "models": {
+    "proposer": "Qwen/Qwen3-4B-Instruct-2507",
+    "solver_after": "",
+    "solver_before": "Qwen/Qwen3-4B-Instruct-2507"
+  },
+  "rubrics": [
+    {
+      "description": "The full evidence chain supports both the question premises and reference answer.",
+      "id": "rubric-evidence-support",
+      "name": "Evidence support",
+      "score_1_anchor": "Key claims or the answer are unsupported or contradicted by the evidence.",
+      "score_3_anchor": "The main answer is supported but one relation is weak, indirect, or incompletely documented.",
+      "score_5_anchor": "Every required relation and the canonical answer are explicitly supported by traceable evidence."
+    },
+    {
+      "description": "The evidence leads to one clear and canonical answer.",
+      "id": "rubric-answer-uniqueness",
+      "name": "Answer uniqueness",
+      "score_1_anchor": "Multiple materially different answers fit the question or the requested answer type is unclear.",
+      "score_3_anchor": "A likely answer exists but normalization, scope, or wording leaves minor ambiguity.",
+      "score_5_anchor": "Exactly one canonical concise answer follows from the question and evidence."
+    },
+    {
+      "description": "Every hop is necessary and contributes to reaching the final answer.",
+      "id": "rubric-hop-necessity",
+      "name": "Multi-hop necessity",
+      "score_1_anchor": "The answer is directly available or one or more hops are decorative or bypassable.",
+      "score_3_anchor": "The chain is multi-hop but one transition can plausibly be skipped or inferred directly.",
+      "score_5_anchor": "Each transition depends on the preceding result and all hops are required."
+    },
+    {
+      "description": "A solver can retrieve the required evidence using the normal search protocol.",
+      "id": "rubric-retrievability",
+      "name": "Search solvability",
+      "score_1_anchor": "Required facts are inaccessible, obscure without usable clues, or depend on unavailable sources.",
+      "score_3_anchor": "The chain is retrievable but queries require fragile wording or evidence is difficult to identify.",
+      "score_5_anchor": "Each hop provides a specific clue that reliably supports a productive search query."
+    },
+    {
+      "description": "The problem distinguishes solver capability instead of being trivial or effectively unsolvable.",
+      "id": "rubric-discrimination",
+      "name": "Capability discrimination",
+      "score_1_anchor": "The problem is trivial, answer-leaking, arbitrary, or not realistically solvable.",
+      "score_3_anchor": "The problem requires some reasoning but has limited depth or discriminative power.",
+      "score_5_anchor": "The problem is challenging yet solvable and rewards robust multi-hop search and reasoning."
+    }
+  ],
+  "schema_version": 1,
+  "skills": [
+    {
+      "evidence": "Initial iteration requirement.",
+      "id": "skill-evidence-chain",
+      "instruction": "Construct a complete, verifiable evidence chain from the seed document to the final answer."
+    },
+    {
+      "evidence": "Initial iteration requirement.",
+      "id": "skill-required-hops",
+      "instruction": "Make every hop necessary to reach the final answer; no intermediate relation may be skipped."
+    },
+    {
+      "evidence": "Initial iteration requirement.",
+      "id": "skill-unambiguous",
+      "instruction": "Remove ambiguity from the question, evidence relations, and canonical reference answer."
+    }
+  ],
+  "stages": {},
+  "status": "running",
+  "updated_at": "2026-07-14T22:47:10.551795+00:00"
+}

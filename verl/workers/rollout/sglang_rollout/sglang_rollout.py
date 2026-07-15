@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import asyncio
+
+from verl.utils.asyncio_utils import get_or_create_event_loop
 import logging
 import multiprocessing as mp
 import os
@@ -709,7 +711,7 @@ class SGLangRollout(BaseRollout):
         request_sampling_params.update(kwargs)
 
         if self._tp_rank == 0:
-            loop = asyncio.get_event_loop()
+            loop = get_or_create_event_loop()
             output = loop.run_until_complete(
                 self._engine.async_generate(
                     prompt=None,  # because we have already convert it to prompt token id
@@ -781,7 +783,7 @@ class SGLangRollout(BaseRollout):
 
         # free cache engine
         if self._engine is not None and self._tp_rank == 0:
-            loop = asyncio.get_event_loop()
+            loop = get_or_create_event_loop()
             loop.run_until_complete(self._engine.flush_cache())
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
@@ -1063,7 +1065,7 @@ class SGLangRollout(BaseRollout):
             req_list = self._preprocess_prompt_to_async_rollout_requests(
                 prompts,
             )
-            loop = asyncio.get_event_loop()
+            loop = get_or_create_event_loop()
             output_req_list = loop.run_until_complete(
                 asyncio.gather(
                     *[self._async_rollout_a_request(req, do_sample, is_validate, **kwargs) for req in req_list],
@@ -1214,7 +1216,7 @@ class SGLangRollout(BaseRollout):
 
         # free cache engine
         if self._engine is not None and self._tp_rank == 0:
-            loop = asyncio.get_event_loop()
+            loop = get_or_create_event_loop()
             loop.run_until_complete(self._engine.flush_cache())
 
         non_tensor_batch = {

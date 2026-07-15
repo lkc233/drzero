@@ -47,6 +47,18 @@ def _endpoint(config: dict[str, Any], key: str) -> EndpointConfig:
     return EndpointConfig.model_validate(value)
 
 
+def _updater_endpoint(config: dict[str, Any]) -> EndpointConfig:
+    """Skills/rubrics updater endpoint.
+
+    Uses a dedicated ``updater_model`` (the untrained model) when configured so the
+    updater stays independent from the judge/scoring ``meta_model``; falls back to
+    ``meta_model`` for backward compatibility when it is absent.
+    """
+    if isinstance(config.get("updater_model"), dict):
+        return _endpoint(config, "updater_model")
+    return _endpoint(config, "meta_model")
+
+
 def _read_json_or_jsonl(path: str) -> Any:
     source = Path(path)
     with source.open(encoding="utf-8") as handle:
@@ -269,7 +281,7 @@ async def _update_skills(args: argparse.Namespace) -> None:
         "analysis": _read_json_or_jsonl(args.analysis),
         "keepout_summary": _read_json_or_jsonl(args.keepout_summary),
     }
-    async with OpenAICompatibleClient(_endpoint(config, "meta_model")) as client:
+    async with OpenAICompatibleClient(_updater_endpoint(config)) as client:
         dynamic_config = config.get("dynamic_state", {})
         updater = DynamicStateUpdater(
             client,
@@ -329,7 +341,7 @@ async def _update_rubrics(args: argparse.Namespace) -> None:
         "analysis": _read_json_or_jsonl(args.analysis),
         "keepout_summary": _read_json_or_jsonl(args.keepout_summary),
     }
-    async with OpenAICompatibleClient(_endpoint(config, "meta_model")) as client:
+    async with OpenAICompatibleClient(_updater_endpoint(config)) as client:
         dynamic_config = config.get("dynamic_state", {})
         updater = DynamicStateUpdater(
             client,

@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 HOPS = [1, 2, 3, 4]
 HOP_RATIO = [4, 3, 2, 1]
-TOKENIZER = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
+TOKENIZER = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B-Instruct-2507")
 
 
 def process_single_row(row, corpus_iter, current_split_name, row_index, skills):

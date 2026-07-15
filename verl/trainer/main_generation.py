@@ -349,10 +349,16 @@ def main_task(config):
             solver_config = EndpointConfig.model_validate(
                 OmegaConf.to_container(config.verify.solver_model, resolve=True)
             )
-            async with OpenAICompatibleClient(solver_config) as solver_client:
+            verify_judge_raw = config.verify.get("judge_model") or config.meta_model
+            verify_judge_config = EndpointConfig.model_validate(
+                OmegaConf.to_container(verify_judge_raw, resolve=True)
+            )
+            async with OpenAICompatibleClient(solver_config) as solver_client, OpenAICompatibleClient(
+                verify_judge_config
+            ) as verify_judge_client:
                 verifier = ProblemVerifier(
                     solver_client,
-                    meta_client,
+                    verify_judge_client,
                     samples=int(config.verify.solver_samples),
                 )
                 for group_index, group in enumerate(candidate_groups):
@@ -371,6 +377,7 @@ def main_task(config):
             metrics = {
                 "meta": meta_client.metrics.model_dump(mode="json"),
                 "solver": solver_client.metrics.model_dump(mode="json"),
+                "verify_judge": verify_judge_client.metrics.model_dump(mode="json"),
             }
         return selected_rows, selected, metrics
 
