@@ -5,7 +5,7 @@
 # This script covers every stage needed to bring up a local retriever that a
 # training job on another machine can call over HTTP:
 #   1. Clone the Search-R1 repository
-#   2. Create the `retriever` conda environment (torch + faiss-gpu + pyserini ...)
+#   2. Create a uv-managed virtual environment (torch + faiss-gpu + pyserini ...)
 #   3. Download the wiki-18 index + corpus from HuggingFace
 #   4. Prepare the data (concatenate index shards, decompress corpus)
 #   5. Launch the local retrieval server (FastAPI, port 8020 by default)
@@ -26,7 +26,7 @@ set -euo pipefail
 # --------------------------------------------------------------------------- #
 REPO_URL="${REPO_URL:-https://github.com/PeterGriffinJin/Search-R1.git}"
 REPO_DIR="${REPO_DIR:-$HOME/Search-R1}"          # where to clone Search-R1
-CONDA_ENV="${CONDA_ENV:-retriever}"              # conda env name
+RETRIEVER_VENV_DIR="${RETRIEVER_VENV_DIR:-$REPO_DIR/.venv-retriever}" # separate from Dr. Zero's .venv
 DATA_DIR="${DATA_DIR:-$REPO_DIR/retriever/data}" # where to store index/corpus
 
 # Retriever config: e5_flat (GPU, accurate), e5_hnsw (CPU, fast), or bm25 (CPU, sparse)
@@ -59,24 +59,11 @@ log() { echo -e "\n\033[1;32m[setup_retriever]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[setup_retriever][warn]\033[0m $*"; }
 
 # --------------------------------------------------------------------------- #
-# Locate conda and define a helper to run commands inside the retriever env
+# Locate uv
 # --------------------------------------------------------------------------- #
-init_conda() {
-    if ! command -v conda >/dev/null 2>&1; then
-        # Try common install locations
-        for c in "$HOME/miniconda3" "$HOME/anaconda3" /opt/conda; do
-            if [ -f "$c/etc/profile.d/conda.sh" ]; then
-                # shellcheck disable=SC1091
-                source "$c/etc/profile.d/conda.sh"
-                break
-            fi
-        done
-    else
-        # shellcheck disable=SC1091
-        source "$(conda info --base)/etc/profile.d/conda.sh"
-    fi
-    if ! command -v conda >/dev/null 2>&1; then
-        echo "ERROR: conda not found. Please install Miniconda/Anaconda first." >&2
+init_uv() {
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "ERROR: uv not found. Install it from https://docs.astral.sh/uv/getting-started/installation/ first." >&2
         exit 1
     fi
 }
@@ -94,23 +81,22 @@ stage_clone() {
 }
 
 # --------------------------------------------------------------------------- #
-# Stage 2: Create the retriever conda environment
+# Stage 2: Create the retriever virtual environment and install dependencies
 # --------------------------------------------------------------------------- #
 stage_env() {
-    if conda env list | awk '{print $1}' | grep -qx "$CONDA_ENV"; then
-        log "Conda env '$CONDA_ENV' already exists — skipping creation."
-        return
+    if [ -x "$RETRIEVER_VENV_DIR/bin/python" ]; then
+        log "Retriever virtual environment already exists at $RETRIEVER_VENV_DIR."
+    else
+        log "Creating isolated retriever environment at $RETRIEVER_VENV_DIR (python=3.10) ..."
+        uv venv --python 3.10 "$RETRIEVER_VENV_DIR"
     fi
-    log "Creating conda env '$CONDA_ENV' (python=3.10) ..."
-    conda create -y -n "$CONDA_ENV" python=3.10
 
-    log "Installing torch + faiss-gpu (via conda) and python deps (via pip) ..."
-    conda install -y -n "$CONDA_ENV" \
-        pytorch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 pytorch-cuda=12.1 \
-        -c pytorch -c nvidia
-    conda install -y -n "$CONDA_ENV" -c pytorch -c nvidia faiss-gpu=1.8.0
-    conda run -n "$CONDA_ENV" pip install \
-        transformers datasets pyserini uvicorn fastapi "huggingface_hub[cli]"
+    log "Installing retriever dependencies via uv (PyTorch 2.4.0, CUDA 12.1) ..."
+    uv pip install --python "$RETRIEVER_VENV_DIR/bin/python" \
+        --index https://download.pytorch.org/whl/cu121 \
+        torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+        faiss-gpu-cu12==1.8.0.2 \
+        transformers datasets pyserini uvicorn fastapi huggingface_hub
 }
 
 # --------------------------------------------------------------------------- #
@@ -128,7 +114,7 @@ stage_data() {
                 log "Index $index_file already exists — skipping download."
             else
                 log "Downloading e5 flat index + corpus from HuggingFace ..."
-                conda run -n "$CONDA_ENV" python "$REPO_DIR/scripts/download.py" --save_path "$DATA_DIR"
+                "$RETRIEVER_VENV_DIR/bin/python" "$REPO_DIR/scripts/download.py" --save_path "$DATA_DIR"
                 log "Concatenating index shards -> $index_file ..."
                 cat "$DATA_DIR"/part_* > "$index_file"
             fi
@@ -139,12 +125,12 @@ stage_data() {
                 log "Index $index_file already exists — skipping download."
             else
                 log "Downloading e5 HNSW64 index from HuggingFace ..."
-                conda run -n "$CONDA_ENV" huggingface-cli download \
+                "$RETRIEVER_VENV_DIR/bin/hf" download \
                     PeterJinGo/wiki-18-e5-index-HNSW64 --repo-type dataset --local-dir "$DATA_DIR"
                 cat "$DATA_DIR"/part_* > "$index_file"
                 # HNSW download does not include the corpus; grab it from the e5-index repo
                 if [ ! -f "$corpus_file" ] && [ ! -f "$corpus_file.gz" ]; then
-                    conda run -n "$CONDA_ENV" huggingface-cli download \
+                    "$RETRIEVER_VENV_DIR/bin/hf" download \
                         PeterJinGo/wiki-18-corpus wiki-18.jsonl.gz --repo-type dataset --local-dir "$DATA_DIR"
                 fi
             fi
@@ -155,7 +141,7 @@ stage_data() {
                 log "BM25 index $index_file already exists — skipping download."
             else
                 log "Downloading BM25 index + corpus from HuggingFace ..."
-                conda run -n "$CONDA_ENV" huggingface-cli download \
+                "$RETRIEVER_VENV_DIR/bin/hf" download \
                     PeterJinGo/wiki-18-bm25-index --repo-type dataset --local-dir "$DATA_DIR"
             fi
             ;;
@@ -192,7 +178,7 @@ stage_launch() {
     case "$RETRIEVER_TYPE" in
         e5_flat)
             export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
-            conda run --no-capture-output -n "$CONDA_ENV" python "$server" \
+            "$RETRIEVER_VENV_DIR/bin/python" "$server" \
                 --index_path "$DATA_DIR/e5_Flat.index" \
                 --corpus_path "$corpus_file" \
                 --topk "$TOPK" \
@@ -201,7 +187,7 @@ stage_launch() {
                 --faiss_gpu
             ;;
         e5_hnsw)
-            conda run --no-capture-output -n "$CONDA_ENV" python "$server" \
+            "$RETRIEVER_VENV_DIR/bin/python" "$server" \
                 --index_path "$DATA_DIR/e5_HNSW64.index" \
                 --corpus_path "$corpus_file" \
                 --topk "$TOPK" \
@@ -209,7 +195,7 @@ stage_launch() {
                 --retriever_model "$RETRIEVER_MODEL"
             ;;
         bm25)
-            conda run --no-capture-output -n "$CONDA_ENV" python "$server" \
+            "$RETRIEVER_VENV_DIR/bin/python" "$server" \
                 --index_path "$DATA_DIR/bm25" \
                 --corpus_path "$corpus_file" \
                 --topk "$TOPK" \
@@ -221,7 +207,7 @@ stage_launch() {
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
-init_conda
+init_uv
 
 if [ "$LAUNCH_ONLY" -eq 1 ]; then
     stage_launch
