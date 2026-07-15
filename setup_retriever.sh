@@ -41,6 +41,9 @@ RETRIEVER_PORT="${RETRIEVER_PORT:-8000}"
 TOPK="${TOPK:-3}"
 GPU_DEVICES="${GPU_DEVICES:-0,1}"                # used by e5_flat only
 RETRIEVER_MODEL="${RETRIEVER_MODEL:-intfloat/e5-base-v2}"
+if [ "$RETRIEVER_TYPE" = "e5_flat" ]; then
+    export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
+fi
 
 # Stage control flags
 DO_LAUNCH=1
@@ -135,6 +138,10 @@ stage_env() {
             FAISS_CUDA_ARCHS="$cuda_archs" \
             FAISS_BUILD_CACHE_DIR="$SCRIPT_DIR/.cache/faiss-build" \
                 bash "$SCRIPT_DIR/scripts/build_faiss_gpu.sh"
+            if ! faiss_gpu_supported; then
+                echo "ERROR: source-built FAISS failed its GPU kernel test." >&2
+                exit 1
+            fi
         fi
     else
         uv pip install --python "$RETRIEVER_VENV_DIR/bin/python" \
@@ -224,7 +231,6 @@ stage_launch() {
 
     case "$RETRIEVER_TYPE" in
         e5_flat)
-            export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
             local faiss_gpu_args=()
             case "$FAISS_USE_GPU" in
                 1|true)
