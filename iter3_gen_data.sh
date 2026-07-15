@@ -3,11 +3,13 @@
 
 set -x
 
-kill -9 $(lsof -t -i :8000);
+export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-4,5,6,7}"
+
+# Keep :8000 alive: it is the local Qwen3.6 judge/updater service.
 
 tp=1
-dp=8
-gpus=8
+dp=4
+gpus=4
 sample_size=5
 rollout_memory_utilization=0.8
 
@@ -37,14 +39,6 @@ TRAIN_DATA_OUT="./data/zero_${MODEL_PATH}.parquet"
 
 
 source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
-
-python search/retrieval_server.py \
-    --index_path='./corpus/e5_Flat.index' \
-    --corpus_path='./corpus/wiki-18.jsonl' \
-    --retriever_model='intfloat/e5-base-v2' \
-    --retriever_name='e5' \
-    --faiss_gpu \
-    --topk 3 &
 
 python -m verl.trainer.main_generation \
     --config-path="$CONFIG_PATH" \

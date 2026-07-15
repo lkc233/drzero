@@ -17,13 +17,13 @@ if [ ! -f "/usr/include/python3.10/Python.h" ]; then
     export CPATH="/home/luokc/miniforge3/include/python3.10:${CPATH}"
 fi
 
-# Retriever is remote (config/search_tool_config.yaml). Reuse the co-located verify
-# server on :8001 (GPU 7); do NOT kill :8000 (standalone judge from serve_vllm.sh).
+# Retriever is remote (config/search_tool_config.yaml). Port 8001 serves the
+# round-start solver; port 8000 remains the local Qwen3.6 judge/updater service.
 kill -9 $(lsof -t -i :8001) 2>/dev/null;
 
 tp=1
 dp=8
-gpus=7            # GPUs 0-6 for generation; GPU 7 reserved for the verify 4B server
+gpus=3            # GPUs 4-6 for generation; GPU 7 reserved for the verify 4B server
 sample_size=5
 rollout_memory_utilization=0.8
 
@@ -46,6 +46,7 @@ model_name=$(basename "$model" | tr '[:upper:]' '[:lower:]')
 # during generation and for verify (round-start solver + judge).
 STATE="./iterations/iter_1/state.json"
 export DRZERO_ITERATION_STATE="$STATE"
+bash "$(dirname "${BASH_SOURCE[0]}")/setup_qwen36_judge.sh" --check
 
 challenger_step=50
 data_partition=1
@@ -88,9 +89,9 @@ if [ "$CACHED_FINGERPRINT" != "$SOURCE_FINGERPRINT" ]; then
 fi
 
 
-# Serve the untrained Qwen3-4B on :8001 for verify (solver answer samples + judge),
-# pinned to GPU 7 so it does not contend with generation on GPUs 0-6.
-CUDA_VISIBLE_DEVICES=7 python -m sglang.launch_server \
+# Serve the round-start solver on :8001 for verify answer samples, pinned to GPU 7.
+# The independent judge calls the Qwen3.6 service on :8000.
+CUDA_VISIBLE_DEVICES="${VERIFY_GPU_DEVICE:-7}" python -m sglang.launch_server \
     --model=${model} \
     --port=8001 \
     --tool-call-parser=qwen25 \
@@ -102,7 +103,7 @@ sleep 30
 
 echo "Logging to: $LOG_FILE"
 
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python -m verl.trainer.main_generation \
+CUDA_VISIBLE_DEVICES="${GENERATION_GPU_DEVICES:-4,5,6}" python -m verl.trainer.main_generation \
     --config-path="$CONFIG_PATH" \
     --config-name='search_multiturn_grpo' \
     +ckpt_path=null \
@@ -114,9 +115,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python -m verl.trainer.main_generation \
     iteration.state_path="$STATE" \
     verify.solver_model.base_url="http://127.0.0.1:8001" \
     verify.solver_model.model_name=${model} \
-    meta_model.base_url="http://127.0.0.1:8001" \
-    meta_model.model_name=${model} \
-    meta_model.api_key_env=null \
     actor_rollout_ref.model.path=$MERGED_MODEL_PATH \
     actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.n=${sample_size} \

@@ -6,7 +6,8 @@ set -x
 # --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
 export CC=/usr/bin/gcc
 export CXX=/usr/bin/g++
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+# GPUs 0-3 are reserved for the local Qwen3.6 judge/updater by default.
+export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-4,5,6,7}"
 export HYDRA_FULL_ERROR=1
 
 source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
@@ -21,13 +22,13 @@ fi
 
 # NOTE: the retriever is remote (see config/search_tool_config.yaml ->
 # http://222.29.51.205:8020/retrieve); we do NOT launch a local retrieval server.
-# We reuse the base-model sglang on :8001 as the rubric-reward judge, so do NOT kill
-# :8000 (that port belongs to the standalone judge from serve_vllm.sh, if running).
+# Port 8000 belongs to the local Qwen3.6 judge/updater service; keep it alive.
+# Port 8001 is only the round-start solver used for reward rollouts.
 kill -9 $(lsof -t -i :8001) 2>/dev/null;
 
 tp=2
-dp=4
-gpus=8
+dp=2
+gpus=4
 batch_per_gpu=2
 rollout_memory_utilization=0.25
 
@@ -56,10 +57,10 @@ VAL_DATA="./data/test.parquet"
 
 
 # --- Dr.Zero iteration state (frozen skills/rubrics) for the rubric reward ---
-# The rubric reward uses an untrained Qwen3-4B as the Meta/Judge model. We reuse the
-# base-model sglang served on :8001 below, so no separate judge server is required.
+# Rubric reward uses the standalone local Qwen3.6 service configured by meta_model.
 STATE="./iterations/iter_1/state.json"
 export DRZERO_ITERATION_STATE="$STATE"
+bash "$(dirname "${BASH_SOURCE[0]}")/setup_qwen36_judge.sh" --check
 if [ ! -f "$STATE" ]; then
     python -m verl.iteration.cli init-state \
         --state "$STATE" --iteration 1 --proposer "$model" --solver "$model"
@@ -111,9 +112,6 @@ python -m verl.trainer.main_ppo \
     custom_reward_function.reward_kwargs.base_url="http://127.0.0.1:8001" \
     custom_reward_function.reward_kwargs.reward_rollout_n=${reward_group_size} \
     iteration.state_path="$STATE" \
-    meta_model.base_url="http://127.0.0.1:8001" \
-    meta_model.model_name=${model} \
-    meta_model.api_key_env=null \
     trainer.logger='["wandb", "console"]' \
     trainer.project_name="dr-zero" \
     trainer.experiment_name="challenger_iter1_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}" \

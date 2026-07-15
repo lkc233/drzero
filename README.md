@@ -71,6 +71,25 @@ python process_test.py --local_dir ./data
 
 ### Iteration 1
 
+For a stronger local Judge/Updater, prepare the isolated Qwen3.6 serving
+environment without changing the training environment:
+
+```bash
+bash setup_qwen36_judge.sh --no-launch
+bash setup_qwen36_judge.sh
+```
+
+The defaults serve `Qwen/Qwen3.6-35B-A3B` on port 8000 with four GPUs. Both the
+judge (`meta_model`) and skills/rubrics update (`updater_model`) use this local
+OpenAI-compatible endpoint. Override `GPU_DEVICES`, `JUDGE_TP_SIZE`,
+`JUDGE_PORT`, or `JUDGE_CONTEXT_LENGTH` when launching it. If the endpoint or
+served model changes, set `DRZERO_META_BASE_URL` / `DRZERO_META_MODEL` and
+`DRZERO_UPDATER_BASE_URL` / `DRZERO_UPDATER_MODEL` before running the pipeline.
+The current iteration-1 scripts reserve GPUs 0-3 for this service and use GPUs
+4-7 for training (generation uses 4-6 and verify sampling uses 7). Override
+`TRAIN_GPU_DEVICES` or `GENERATION_GPU_DEVICES` if your placement differs. Each
+judge-dependent stage checks `/v1/models` before starting.
+
 **1. Train Proposer:**
 Train the proposer agent to generate challenging yet manageable questions for the base solver.
 

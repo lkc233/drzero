@@ -6,7 +6,8 @@ set -x
 # --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
 export CC=/usr/bin/gcc
 export CXX=/usr/bin/g++
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+# GPUs 0-3 are reserved for the local Qwen3.6 judge/updater by default.
+export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-4,5,6,7}"
 export HYDRA_FULL_ERROR=1
 
 source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
@@ -22,8 +23,8 @@ fi
 kill -9 $(lsof -t -i :8001) 2>/dev/null;
 
 tp=2
-dp=4
-gpus=8
+dp=2
+gpus=4
 batch_per_gpu=2
 rollout_memory_utilization=0.5
 

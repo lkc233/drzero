@@ -3,15 +3,17 @@
 
 set -x
 
-kill -9 $(lsof -t -i :8000);
+export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-4,5,6,7}"
+
+# Keep :8000 alive: it is the local Qwen3.6 judge/updater service.
 kill -9 $(lsof -t -i :8001);
 
 cur_iter=2
 prev_iter=1
 
 tp=2
-dp=4
-gpus=8
+dp=2
+gpus=4
 batch_per_gpu=2
 rollout_memory_utilization=0.25
 
@@ -42,14 +44,6 @@ RESUME_PATH="./checkpoints/dr-zero/challenger_iter${prev_iter}_ratio${hop_ratio}
 
 
 source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
-
-python search/retrieval_server.py \
-    --index_path='./corpus/e5_Flat.index' \
-    --corpus_path='./corpus/wiki-18.jsonl' \
-    --retriever_model='intfloat/e5-base-v2' \
-    --retriever_name='e5' \
-    --faiss_gpu \
-    --topk 3 &
 
 python -m sglang.launch_server \
     --model=$SOLVER_PATH \
