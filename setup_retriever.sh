@@ -14,7 +14,7 @@
 # Usage:
 #   bash setup_retriever.sh                # run all stages, then launch
 #   RETRIEVER_TYPE=bm25 bash setup_retriever.sh
-#   GPU_DEVICES=0,1 PORT=8000 bash setup_retriever.sh
+#   GPU_DEVICES=0,1 RETRIEVER_PORT=8000 bash setup_retriever.sh
 #   bash setup_retriever.sh --no-launch    # set everything up but do not launch
 #   bash setup_retriever.sh --launch-only  # only (re)launch the server
 #
@@ -36,10 +36,7 @@ export HF_HOME="${HF_HOME:-$SCRIPT_DIR/.cache/huggingface}"
 RETRIEVER_TYPE="${RETRIEVER_TYPE:-e5_flat}"
 
 # Server config
-# NOTE: retrieval_server.py hardcodes host=0.0.0.0 and port=8000. PORT below is
-# only used for messages/checks; to actually change it, edit the uvicorn.run(...)
-# line at the bottom of search/retrieval_server.py.
-PORT="${PORT:-8000}"
+RETRIEVER_PORT="${RETRIEVER_PORT:-8000}"
 TOPK="${TOPK:-3}"
 GPU_DEVICES="${GPU_DEVICES:-0,1}"                # used by e5_flat only
 RETRIEVER_MODEL="${RETRIEVER_MODEL:-intfloat/e5-base-v2}"
@@ -59,7 +56,7 @@ for arg in "$@"; do
 done
 
 log() { echo -e "\n\033[1;32m[setup_retriever]\033[0m $*"; }
-warn() { echo -e "\033[1;33m[setup_retriever][warn]\033[0m $*"; }
+info() { echo -e "\033[1;34m[setup_retriever]\033[0m $*"; }
 
 # --------------------------------------------------------------------------- #
 # Locate uv
@@ -164,12 +161,9 @@ stage_launch() {
     local server="$SCRIPT_DIR/search/retrieval_server.py"
     local corpus_file="$DATA_DIR/wiki-18.jsonl"
 
-    log "Launching retriever ($RETRIEVER_TYPE) on 0.0.0.0:8000 (topk=$TOPK) ..."
-    warn "Remote training must point its search URL to: http://<this-server-ip>:8000/retrieve"
-    warn "Ensure port 8000 is open in the firewall between the two servers."
-    if [ "$PORT" != "8000" ]; then
-        warn "PORT=$PORT requested but retrieval_server.py is hardcoded to 8000; edit the uvicorn.run(...) line to change it."
-    fi
+    log "Launching retriever ($RETRIEVER_TYPE) on 0.0.0.0:$RETRIEVER_PORT (topk=$TOPK) ..."
+    info "Remote training must point its search URL to: http://<this-server-ip>:$RETRIEVER_PORT/retrieve"
+    info "Ensure port $RETRIEVER_PORT is open in the firewall between the two servers."
 
     case "$RETRIEVER_TYPE" in
         e5_flat)
@@ -178,6 +172,7 @@ stage_launch() {
                 --index_path "$DATA_DIR/e5_Flat.index" \
                 --corpus_path "$corpus_file" \
                 --topk "$TOPK" \
+                --port "$RETRIEVER_PORT" \
                 --retriever_name e5 \
                 --retriever_model "$RETRIEVER_MODEL" \
                 --faiss_gpu
@@ -187,6 +182,7 @@ stage_launch() {
                 --index_path "$DATA_DIR/e5_HNSW64.index" \
                 --corpus_path "$corpus_file" \
                 --topk "$TOPK" \
+                --port "$RETRIEVER_PORT" \
                 --retriever_name e5 \
                 --retriever_model "$RETRIEVER_MODEL"
             ;;
@@ -195,6 +191,7 @@ stage_launch() {
                 --index_path "$DATA_DIR/bm25" \
                 --corpus_path "$corpus_file" \
                 --topk "$TOPK" \
+                --port "$RETRIEVER_PORT" \
                 --retriever_name bm25
             ;;
     esac
