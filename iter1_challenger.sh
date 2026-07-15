@@ -1,34 +1,37 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
+set -euo pipefail
 set -x
 
 # --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
 export CC=/usr/bin/gcc
 export CXX=/usr/bin/g++
-# GPUs 0-3 are reserved for the local Qwen3.6 judge/updater by default.
-export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-4,5,6,7}"
+# GPUs 0-1 host Qwen3.6 and the retriever; training uses GPUs 2-7.
+export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-2,3,4,5,6,7}"
 export HYDRA_FULL_ERROR=1
+export WANDB_MODE="${WANDB_MODE:-offline}"
 
 source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
 # Put the active env's CUDA libs on the linker path (conda first, uv .venv fallback).
-export LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LIBRARY_PATH}"
-export LD_LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LD_LIBRARY_PATH}"
+export LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LD_LIBRARY_PATH:-}"
 # The venv uses system python3.10 without dev headers; Triton/sglang JIT-compile at
 # runtime and need Python.h. Borrow ABI-compatible 3.10 headers from miniforge.
 if [ ! -f "/usr/include/python3.10/Python.h" ]; then
-    export CPATH="/home/luokc/miniforge3/include/python3.10:${CPATH}"
+    export CPATH="/home/luokc/miniforge3/include/python3.10:${CPATH:-}"
 fi
 
-# NOTE: the retriever is remote (see config/search_tool_config.yaml ->
-# http://222.29.51.205:8020/retrieve); we do NOT launch a local retrieval server.
+# The local retriever is expected at 127.0.0.1:8020 by default; override it with
+# DRZERO_RETRIEVER_URL when the retriever runs on another host.
 # Port 8000 belongs to the local Qwen3.6 judge/updater service; keep it alive.
 # Port 8001 is only the round-start solver used for reward rollouts.
-kill -9 $(lsof -t -i :8001) 2>/dev/null;
+existing_server_pids="$(lsof -t -i :8001 2>/dev/null || true)"
+if [ -n "$existing_server_pids" ]; then kill -9 $existing_server_pids; fi
 
 tp=2
-dp=2
-gpus=4
+dp=3
+gpus=6
 batch_per_gpu=2
 rollout_memory_utilization=0.25
 
@@ -74,8 +77,13 @@ python -m sglang.launch_server \
     --dp-size=${dp} \
     --tp-size=${tp} \
     --log-level=error &
-
-sleep 30
+SERVER_PID=$!
+cleanup() { kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+bash "$(dirname "${BASH_SOURCE[0]}")/scripts/wait_for_model_server.sh" \
+    "http://127.0.0.1:8001/v1/models" "$model" "$SERVER_PID"
+bash "$(dirname "${BASH_SOURCE[0]}")/scripts/wait_for_model_server.sh" \
+    "http://127.0.0.1:8000/v1/models" "Qwen/Qwen3.6-35B-A3B" 0
 
 echo "Logging to: $LOG_FILE"
 
@@ -84,14 +92,14 @@ python -m verl.trainer.main_ppo \
     --config-name='search_multiturn_grpo' \
     data.train_files=$TRAIN_DATA \
     data.val_files=$VAL_DATA  \
-    data.train_batch_size=256 \
+    data.train_batch_size=240 \
     algorithm.use_kl_in_reward=False \
     algorithm.adv_estimator=${algorithm} \
     actor_rollout_ref.model.path=${model} \
     actor_rollout_ref.actor.grad_clip=0.1 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=256 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=240 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${batch_per_gpu} \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \

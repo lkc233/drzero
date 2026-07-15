@@ -17,13 +17,13 @@ if [ ! -f "/usr/include/python3.10/Python.h" ]; then
     export CPATH="/home/luokc/miniforge3/include/python3.10:${CPATH}"
 fi
 
-# Retriever is remote (config/search_tool_config.yaml). Port 8001 serves the
-# round-start solver; port 8000 remains the local Qwen3.6 judge/updater service.
+# Retriever uses 127.0.0.1:8020 by default. Port 8001 serves the round-start
+# solver; port 8000 remains the local Qwen3.6 judge/updater service.
 kill -9 $(lsof -t -i :8001) 2>/dev/null;
 
 tp=1
-dp=8
-gpus=3            # GPUs 4-6 for generation; GPU 7 reserved for the verify 4B server
+dp=6
+gpus=6            # GPUs 2-7 are all used for generation; verify starts afterward.
 sample_size=5
 rollout_memory_utilization=0.8
 
@@ -73,10 +73,10 @@ TOOL_CONFIG="$CONFIG_PATH/search_tool_config.yaml"
 TRAIN_DATA="./data/zero_ratio${hop_ratio}.parquet"
 TRAIN_DATA_OUT="./data/zero_${MODEL_PATH}.parquet"
 
-# Generation uses seven workers while the proposer checkpoint was saved with eight
+# Generation uses six workers while the proposer checkpoint was saved with eight
 # FSDP shards. Merge once to a world-size-independent HF checkpoint so the rollout
 # workers initialize from the trained proposer without attempting an incompatible
-# 8-way -> 7-way sharded checkpoint load.
+# 8-way -> 6-way sharded checkpoint load.
 if [ "$CACHED_FINGERPRINT" != "$SOURCE_FINGERPRINT" ]; then
     if ! python -m verl.model_merger merge \
         --backend fsdp \
@@ -89,21 +89,9 @@ if [ "$CACHED_FINGERPRINT" != "$SOURCE_FINGERPRINT" ]; then
 fi
 
 
-# Serve the round-start solver on :8001 for verify answer samples, pinned to GPU 7.
-# The independent judge calls the Qwen3.6 service on :8000.
-CUDA_VISIBLE_DEVICES="${VERIFY_GPU_DEVICE:-7}" python -m sglang.launch_server \
-    --model=${model} \
-    --port=8001 \
-    --tool-call-parser=qwen25 \
-    --mem-fraction-static=0.8 \
-    --tp-size=1 \
-    --log-level=error &
-
-sleep 30
-
 echo "Logging to: $LOG_FILE"
 
-CUDA_VISIBLE_DEVICES="${GENERATION_GPU_DEVICES:-4,5,6}" python -m verl.trainer.main_generation \
+CUDA_VISIBLE_DEVICES="${GENERATION_GPU_DEVICES:-2,3,4,5,6,7}" python -m verl.trainer.main_generation \
     --config-path="$CONFIG_PATH" \
     --config-name='search_multiturn_grpo' \
     +ckpt_path=null \
@@ -115,6 +103,9 @@ CUDA_VISIBLE_DEVICES="${GENERATION_GPU_DEVICES:-4,5,6}" python -m verl.trainer.m
     iteration.state_path="$STATE" \
     verify.solver_model.base_url="http://127.0.0.1:8001" \
     verify.solver_model.model_name=${model} \
+    verify.local_server.enabled=true \
+    verify.local_server.model_path=${model} \
+    verify.local_server.gpu_devices="${VERIFY_GPU_DEVICE:-2}" \
     actor_rollout_ref.model.path=$MERGED_MODEL_PATH \
     actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.n=${sample_size} \

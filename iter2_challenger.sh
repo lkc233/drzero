@@ -1,19 +1,22 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
+set -euo pipefail
 set -x
 
-export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-4,5,6,7}"
+export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-2,3,4,5,6,7}"
+export WANDB_MODE="${WANDB_MODE:-offline}"
 
 # Keep :8000 alive: it is the local Qwen3.6 judge/updater service.
-kill -9 $(lsof -t -i :8001);
+existing_server_pids="$(lsof -t -i :8001 2>/dev/null || true)"
+if [ -n "$existing_server_pids" ]; then kill -9 $existing_server_pids; fi
 
 cur_iter=2
 prev_iter=1
 
 tp=2
-dp=2
-gpus=4
+dp=3
+gpus=6
 batch_per_gpu=2
 rollout_memory_utilization=0.25
 
@@ -28,7 +31,7 @@ fi
 algorithm=grpo_batch
 grpo_group_size=1
 reward_group_size=5
-model=Qwen/Qwen2.5-3B-Instruct
+model=Qwen/Qwen3-4B-Instruct-2507
 model_name=$(basename "$model" | tr '[:upper:]' '[:lower:]')
 
 CONFIG_PATH="./config"
@@ -41,9 +44,16 @@ SOLVER_NAME="solver_iter${prev_iter}_hf"
 CHALLENGER_NAME="challenger_iter${cur_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}"
 SOLVER_PATH="./checkpoints/dr-zero/solver_iter${prev_iter}_ratio${hop_ratio}_${solver_algorithm}_group${solver_grpo_group_size}_${model_name}/${SOLVER_NAME}"
 RESUME_PATH="./checkpoints/dr-zero/challenger_iter${prev_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}/global_step_50"
+STATE="./iterations/iter_${cur_iter}/state.json"
+export DRZERO_ITERATION_STATE="$STATE"
 
 
 source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
+
+if [ ! -f "$STATE" ]; then
+    python -m verl.iteration.cli init-state \
+        --state "$STATE" --iteration "$cur_iter" --proposer "$model" --solver "$SOLVER_NAME"
+fi
 
 python -m sglang.launch_server \
     --model=$SOLVER_PATH \
@@ -54,22 +64,27 @@ python -m sglang.launch_server \
     --dp-size=${dp} \
     --tp-size=${tp} \
     --log-level=error &
-
-sleep 30
+SERVER_PID=$!
+cleanup() { kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+bash "$(dirname "${BASH_SOURCE[0]}")/scripts/wait_for_model_server.sh" \
+    "http://127.0.0.1:8001/v1/models" "$SOLVER_NAME" "$SERVER_PID"
+bash "$(dirname "${BASH_SOURCE[0]}")/scripts/wait_for_model_server.sh" \
+    "http://127.0.0.1:8000/v1/models" "Qwen/Qwen3.6-35B-A3B" 0
 
 python -m verl.trainer.main_ppo \
     --config-path=$CONFIG_PATH \
     --config-name="search_multiturn_grpo" \
     data.train_files=$TRAIN_DATA \
     data.val_files=$VAL_DATA  \
-    data.train_batch_size=256 \
+    data.train_batch_size=240 \
     algorithm.use_kl_in_reward=False \
     algorithm.adv_estimator=${algorithm} \
     actor_rollout_ref.model.path=${model} \
     actor_rollout_ref.actor.grad_clip=0.1 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=256 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=240 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${batch_per_gpu} \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
@@ -89,6 +104,7 @@ python -m verl.trainer.main_ppo \
     custom_reward_function.reward_kwargs.model_name=$SOLVER_NAME \
     custom_reward_function.reward_kwargs.base_url="http://127.0.0.1:8001" \
     custom_reward_function.reward_kwargs.reward_rollout_n=${reward_group_size} \
+    iteration.state_path="$STATE" \
     trainer.logger='["wandb", "console"]' \
     trainer.project_name="dr-zero" \
     trainer.experiment_name=$CHALLENGER_NAME \

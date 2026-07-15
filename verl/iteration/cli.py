@@ -11,11 +11,15 @@ from omegaconf import OmegaConf
 
 from verl.iteration.core import (
     Candidate,
+    IterationState,
     KeepoutResult,
+    ModelReferences,
+    Rubric,
     Skill,
     StateStore,
     atomic_write_json,
     diff_by_id,
+    dynamic_state_hash,
 )
 from verl.iteration.generation import atomic_write_jsonl
 from verl.iteration.models import (
@@ -386,6 +390,42 @@ def update_rubrics(args: argparse.Namespace) -> None:
     asyncio.run(_update_rubrics(args))
 
 
+def advance_state(args: argparse.Namespace) -> None:
+    """Freeze updater outputs into the state consumed by the next round."""
+    current = StateStore(args.state).load()
+    skills_payload = _read_json_or_jsonl(args.skills)
+    rubrics_payload = _read_json_or_jsonl(args.rubrics)
+    skills = skills_payload.get("skills", skills_payload)
+    rubrics = rubrics_payload.get("rubrics", rubrics_payload)
+    next_state = IterationState(
+        iteration=current.iteration + 1,
+        models=ModelReferences(proposer=args.proposer, solver_before=args.solver),
+        skills=[Skill.model_validate(item) for item in skills],
+        rubrics=[Rubric.model_validate(item) for item in rubrics],
+        config_snapshot=current.config_snapshot,
+        artifacts={"previous_iteration_state": str(Path(args.state).resolve())},
+    )
+    destination = StateStore(args.next_state)
+    if destination.path.exists():
+        existing = destination.load()
+        if dynamic_state_hash(existing) != dynamic_state_hash(next_state):
+            raise ValueError(f"next state already exists with different content: {destination.path}")
+        return
+    destination.save(next_state)
+
+
+def record_solver_after(args: argparse.Namespace) -> None:
+    """Record the converted solver used by keepout evaluation."""
+    store = StateStore(args.state)
+    state = store.load()
+    if state.models.solver_after and state.models.solver_after != args.solver:
+        raise ValueError(
+            f"solver_after is already {state.models.solver_after!r}, not {args.solver!r}"
+        )
+    state.models.solver_after = args.solver
+    store.save(state)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Dr.Zero iteration orchestration utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -437,6 +477,20 @@ def build_parser() -> argparse.ArgumentParser:
     rubrics.add_argument("--skills", required=True)
     rubrics.add_argument("--output", required=True)
     rubrics.set_defaults(func=update_rubrics)
+
+    advance = subparsers.add_parser("advance-state")
+    advance.add_argument("--state", required=True)
+    advance.add_argument("--next-state", required=True)
+    advance.add_argument("--skills", required=True)
+    advance.add_argument("--rubrics", required=True)
+    advance.add_argument("--proposer", required=True)
+    advance.add_argument("--solver", required=True)
+    advance.set_defaults(func=advance_state)
+
+    converted = subparsers.add_parser("record-solver-after")
+    converted.add_argument("--state", required=True)
+    converted.add_argument("--solver", required=True)
+    converted.set_defaults(func=record_solver_after)
 
     return parser
 

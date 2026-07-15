@@ -7,14 +7,14 @@
 #   1. Create a uv-managed virtual environment (torch + faiss-gpu + pyserini ...)
 #   2. Download the wiki-18 index + corpus from HuggingFace
 #   3. Prepare the data (concatenate index shards, decompress corpus)
-#   4. Launch the local retrieval server (FastAPI, port 8000 by default)
+#   4. Launch the local retrieval server (FastAPI, port 8020 by default)
 #
 # It is idempotent: finished stages are detected and skipped on re-run.
 #
 # Usage:
 #   bash setup_retriever.sh                # run all stages, then launch
 #   RETRIEVER_TYPE=bm25 bash setup_retriever.sh
-#   GPU_DEVICES=0,1 RETRIEVER_PORT=8000 bash setup_retriever.sh
+#   GPU_DEVICES=0,1 RETRIEVER_PORT=8020 bash setup_retriever.sh
 #   bash setup_retriever.sh --no-launch    # set everything up but do not launch
 #   bash setup_retriever.sh --launch-only  # only (re)launch the server
 #
@@ -37,7 +37,7 @@ RETRIEVER_TYPE="${RETRIEVER_TYPE:-e5_flat}"
 FAISS_USE_GPU="${FAISS_USE_GPU:-auto}"          # auto, 1 (force GPU), or 0 (CPU index)
 
 # Server config
-RETRIEVER_PORT="${RETRIEVER_PORT:-8000}"
+RETRIEVER_PORT="${RETRIEVER_PORT:-8020}"
 TOPK="${TOPK:-3}"
 GPU_DEVICES="${GPU_DEVICES:-0,1}"                # used by e5_flat only
 RETRIEVER_MODEL="${RETRIEVER_MODEL:-intfloat/e5-base-v2}"

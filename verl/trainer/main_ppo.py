@@ -49,19 +49,28 @@ def run_ppo(config) -> None:
                 for distributed PPO training including Ray initialization settings,
                 model paths, and training hyperparameters.
     """
+    # Ray's runtime-env agent talks to the local dashboard over HTTP.  Some
+    # cluster shells inject HTTP(S)_PROXY globally, so make local Ray traffic
+    # proxy-independent even when this entrypoint is invoked outside our shell
+    # scripts.  Model downloads still retain their configured proxy behavior.
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
         # Set environment variables in the runtime environment to control tokenizer parallelism,
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
-        temp_dir = os.path.join(os.getcwd(), "tmp/ray")
-        if len(temp_dir) > 64:
-            temp_dir = "/tmp/ray"
+        # Ray appends a long session/socket suffix; using the repository path can
+        # exceed Linux's 107-byte AF_UNIX limit even when the base path looks short.
+        temp_dir = os.environ.get("DRZERO_RAY_TMPDIR", "/tmp/drzero-ray")
+        runtime_env = get_ppo_ray_runtime_env()
+        os.environ.update(runtime_env.get("env_vars", {}))
         ray.init(
-            runtime_env=get_ppo_ray_runtime_env(),
             num_cpus=config.ray_init.num_cpus,
             _temp_dir=temp_dir,
+            # Ray rewrites 127.0.0.1 to the pod's bare IPv6 address.  The
+            # loopback alias avoids that rewrite and keeps single-node gRPC
+            # endpoints correctly formatted.
+            _node_ip_address=os.environ.get("DRZERO_RAY_NODE_IP", "127.0.0.2"),
         )
 
     # Create a remote instance of the TaskRunner class, and

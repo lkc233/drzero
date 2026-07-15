@@ -5,8 +5,11 @@ description = "Isolated SGLang serving environment for the Dr. Zero Qwen3.6 judg
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "huggingface-hub",
-    "sglang",
+    "nvidia-cudnn-cu12==9.16.0.29",
+    "pybase64",
+    "sglang==0.5.9",
 ]
 
 [tool.uv]
 package = false
+override-dependencies = ["nvidia-cudnn-cu12==9.16.0.29"]

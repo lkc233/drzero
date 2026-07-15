@@ -17,6 +17,11 @@ Generate responses given a dataset of prompts
 
 import asyncio
 import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
 from collections import defaultdict
 from pathlib import Path
 from pprint import pprint
@@ -69,6 +74,80 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.workers.fsdp_workers import ActorRolloutRefWorker
 
 
+def _release_generation_workers(worker_group: RayWorkerGroup, resource_pool: RayResourcePool) -> None:
+    """Release rollout actors and their placement groups before verification."""
+    for worker in worker_group._workers:
+        ray.kill(worker, no_restart=True)
+    for placement_group in resource_pool.pgs or []:
+        ray.util.remove_placement_group(placement_group)
+    # Actor teardown is asynchronous; give CUDA contexts time to disappear before
+    # the serial verify server claims one of the same physical GPUs.
+    time.sleep(5)
+
+
+def _start_local_verify_server(config) -> tuple[subprocess.Popen | None, object | None]:
+    server_config = config.verify.get("local_server", {})
+    if not bool(server_config.get("enabled", False)):
+        return None, None
+
+    endpoint = EndpointConfig.model_validate(OmegaConf.to_container(config.verify.solver_model, resolve=True))
+    model_path = str(server_config.get("model_path") or endpoint.model_name)
+    port = int(server_config.get("port", 8001))
+    log_path = Path(str(server_config.get("log_path", "logs/verify_solver.log")))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("a", encoding="utf-8")
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(server_config.get("gpu_devices", "2"))
+    command = [
+        sys.executable,
+        "-m",
+        "sglang.launch_server",
+        "--model",
+        model_path,
+        "--served-model-name",
+        endpoint.model_name,
+        "--port",
+        str(port),
+        "--tp-size",
+        str(int(server_config.get("tp_size", 1))),
+        "--mem-fraction-static",
+        str(float(server_config.get("mem_fraction_static", 0.8))),
+        "--tool-call-parser",
+        "qwen25",
+        "--log-level",
+        "error",
+    ]
+    process = subprocess.Popen(command, env=env, stdout=log_handle, stderr=subprocess.STDOUT)
+    models_url = endpoint.base_url.rstrip("/") + "/v1/models"
+    deadline = time.monotonic() + float(server_config.get("startup_timeout_seconds", 300))
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            log_handle.close()
+            raise RuntimeError(f"local verify server exited with code {process.returncode}; see {log_path}")
+        try:
+            with urllib.request.urlopen(models_url, timeout=5) as response:
+                if response.status == 200:
+                    return process, log_handle
+        except Exception:
+            time.sleep(2)
+    process.terminate()
+    process.wait(timeout=30)
+    log_handle.close()
+    raise TimeoutError(f"local verify server did not become ready at {models_url}; see {log_path}")
+
+
+def _stop_local_verify_server(process: subprocess.Popen | None, log_handle: object | None) -> None:
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+    if log_handle is not None:
+        log_handle.close()
+
+
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
     run_generation(config)
@@ -77,13 +156,11 @@ def main(config):
 def run_generation(config) -> None:
     if not ray.is_initialized():
         # this is for local ray cluster
-        temp_dir = os.path.join(os.getcwd(), "tmp/ray")
-        if len(temp_dir) > 64:
-            temp_dir = "/tmp/ray"
+        temp_dir = os.environ.get("DRZERO_RAY_TMPDIR", "/tmp/drzero-ray")
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}},
             num_cpus=config.ray_init.num_cpus,
             _temp_dir=temp_dir,
+            _node_ip_address=os.environ.get("DRZERO_RAY_NODE_IP", "127.0.0.2"),
         )
 
     ray.get(main_task.remote(config))
@@ -359,6 +436,8 @@ def main_task(config):
                 legacy_answers.append(raw_ans[sample_idx])
                 legacy_contexts.append(raw_messages[sample_idx])
 
+    _release_generation_workers(wg, resource_pool)
+
     if not state:
         for idx, (question, answer, context) in enumerate(
             zip(legacy_questions, legacy_answers, legacy_contexts, strict=True)
@@ -481,7 +560,11 @@ def main_task(config):
             }
         return selected_rows, selected, metrics
 
-    selected_source_rows, selected_candidates, model_call_metrics = asyncio.run(_rank_and_verify_all())
+    verify_server, verify_log = _start_local_verify_server(config)
+    try:
+        selected_source_rows, selected_candidates, model_call_metrics = asyncio.run(_rank_and_verify_all())
+    finally:
+        _stop_local_verify_server(verify_server, verify_log)
     model_call_metrics["resume"] = {
         "resumed_snapshot": resume_candidates,
         "completed_groups_reused": completed_groups_reused,

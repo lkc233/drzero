@@ -18,14 +18,18 @@ JUDGE_VENV_DIR="${JUDGE_VENV_DIR:-$SCRIPT_DIR/.venv-qwen36-judge}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$SCRIPT_DIR/.cache/uv}"
 export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$SCRIPT_DIR/.cache/uv/python}"
 export HF_HOME="${HF_HOME:-$SCRIPT_DIR/.cache/huggingface}"
+# SGLang warms up through its own localhost HTTP endpoint. Cluster-wide proxy
+# variables must not route that request through the compliance gateway.
+export NO_PROXY="127.0.0.1,localhost,${NO_PROXY:-}"
+export no_proxy="$NO_PROXY"
 
 JUDGE_MODEL="${JUDGE_MODEL:-Qwen/Qwen3.6-35B-A3B}"
 JUDGE_HOST="${JUDGE_HOST:-0.0.0.0}"
 JUDGE_PORT="${JUDGE_PORT:-8000}"
-JUDGE_TP_SIZE="${JUDGE_TP_SIZE:-4}"
+JUDGE_TP_SIZE="${JUDGE_TP_SIZE:-2}"
 JUDGE_CONTEXT_LENGTH="${JUDGE_CONTEXT_LENGTH:-32768}"
-JUDGE_MEM_FRACTION="${JUDGE_MEM_FRACTION:-0.85}"
-GPU_DEVICES="${GPU_DEVICES:-0,1,2,3}"
+JUDGE_MEM_FRACTION="${JUDGE_MEM_FRACTION:-0.80}"
+GPU_DEVICES="${GPU_DEVICES:-0,1}"
 DO_LAUNCH=1
 CHECK_ONLY=0
 
@@ -71,6 +75,11 @@ if [ "$DO_LAUNCH" -eq 0 ]; then
 fi
 
 export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
+# SGLang's warmup calls the server through the node's IPv6 address rather than
+# 127.0.0.1 on this cluster.  Dependencies and model weights are already local
+# after uv sync/model resolution, so keep the serving process fully off proxy.
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+export HF_HUB_OFFLINE=1
 echo "[qwen36-judge] Serving $JUDGE_MODEL on $JUDGE_HOST:$JUDGE_PORT"
 exec "$JUDGE_VENV_DIR/bin/python" -m sglang.launch_server \
     --model-path "$JUDGE_MODEL" \

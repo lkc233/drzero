@@ -14,6 +14,7 @@
 
 import inspect
 import logging
+import os
 import time
 from copy import deepcopy
 from typing import Any, Optional
@@ -210,6 +211,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         num_gpus=1,
         sharing_with=None,
         device_name="cuda",
+        worker_env=None,
     ) -> Any:
         """Create and return a Ray actor with the configured options.
 
@@ -249,7 +251,10 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         # print("cls:", self.cls)
         # print("args: ", self.args)
         # print("kwargs: ", self.kwargs)
-        return self.cls.options(**options).remote(*self.args, **self.kwargs)
+        remote_kwargs = dict(self.kwargs)
+        if worker_env is not None:
+            remote_kwargs["_verl_worker_env"] = worker_env
+        return self.cls.options(**options).remote(*self.args, **remote_kwargs)
 
 
 class RayWorkerGroup(WorkerGroup):
@@ -395,7 +400,11 @@ class RayWorkerGroup(WorkerGroup):
                         }
                     )
                 else:
-                    ray_cls_with_init.update_options({"runtime_env": {"env_vars": env_vars}, "name": name})
+                    # Avoid Ray runtime_env for plain environment injection. On
+                    # the cluster it is proxied through an unavailable HTTP
+                    # gateway; the actor applies these values before Worker
+                    # initialization instead.
+                    ray_cls_with_init.update_options({"name": name})
 
                 if detached:
                     ray_cls_with_init.update_options({"lifetime": "detached"})
@@ -407,6 +416,7 @@ class RayWorkerGroup(WorkerGroup):
                     use_gpu=use_gpu,
                     num_gpus=num_gpus,
                     device_name=self.device_name,
+                    worker_env=env_vars,
                 )
                 self._workers.append(worker)
                 self._worker_names.append(name)
@@ -772,7 +782,14 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
 
     # TODO: create a class with customizable name
     class WorkerDict(worker_cls):
-        def __init__(self):
+        def __new__(cls, _verl_worker_env=None):
+            if _verl_worker_env:
+                os.environ.update(_verl_worker_env)
+            return super().__new__(cls)
+
+        def __init__(self, _verl_worker_env=None):
+            # __new__ installs the actor-specific environment before Worker.__new__
+            # performs its one required register-center initialization.
             super().__init__()
             self.worker_dict = {}
             for key, user_defined_cls in cls_dict.items():

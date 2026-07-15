@@ -1,7 +1,7 @@
 tools:
   - class_name: verl.tools.search_tool.SearchTool
     config:
-      retrieval_service_url: http://222.29.51.205:8020/retrieve
+      retrieval_service_url: ${oc.env:DRZERO_RETRIEVER_URL,"http://127.0.0.1:8020/retrieve"}
       num_workers: 120
       rate_limit: 120
       timeout: 300

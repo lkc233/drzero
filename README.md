@@ -42,7 +42,12 @@ The recommended one-click setup uses this repository's `search/` implementation 
 bash setup_retriever.sh
 ```
 
-By default, the retriever environment is `.venv-retriever`, the index and corpus are stored under `data/retriever`, and the server listens on port 8000. Set `RETRIEVER_PORT` to override the port. Run `bash setup_retriever.sh --no-launch` to prepare without launching.
+By default, the retriever environment is `.venv-retriever`, the index and corpus
+are stored under `data/retriever`, and the server listens on port 8020. Training
+and keepout evaluation use `http://127.0.0.1:8020/retrieve` by default. Set
+`RETRIEVER_PORT` when launching and `DRZERO_RETRIEVER_URL` for training if the
+endpoint is different. Run `bash setup_retriever.sh --no-launch` to prepare
+without launching.
 
 `FAISS_USE_GPU=auto` is the default. On Hopper/H100 (`sm_90`), setup compiles FAISS GPU from a pinned source commit because the prebuilt wheel lacks H100 kernels. The first build can take several minutes; subsequent runs reuse the installed build. Building and running require a system CUDA 12.x Toolkit with `nvcc`, system BLAS/LAPACK libraries, and a compatible NVIDIA driver. Set `FAISS_USE_GPU=1` or `FAISS_USE_GPU=0` to force GPU or CPU index mode.
 
@@ -79,16 +84,28 @@ bash setup_qwen36_judge.sh --no-launch
 bash setup_qwen36_judge.sh
 ```
 
-The defaults serve `Qwen/Qwen3.6-35B-A3B` on port 8000 with four GPUs. Both the
+The defaults serve `Qwen/Qwen3.6-35B-A3B` on port 8000 with two GPUs. Both the
 judge (`meta_model`) and skills/rubrics update (`updater_model`) use this local
 OpenAI-compatible endpoint. Override `GPU_DEVICES`, `JUDGE_TP_SIZE`,
 `JUDGE_PORT`, or `JUDGE_CONTEXT_LENGTH` when launching it. If the endpoint or
 served model changes, set `DRZERO_META_BASE_URL` / `DRZERO_META_MODEL` and
 `DRZERO_UPDATER_BASE_URL` / `DRZERO_UPDATER_MODEL` before running the pipeline.
-The current iteration-1 scripts reserve GPUs 0-3 for this service and use GPUs
-4-7 for training (generation uses 4-6 and verify sampling uses 7). Override
+The current scripts colocate this service and the retriever on GPUs 0-1, and use
+all of GPUs 2-7 for training and generation. Verification runs only after the
+generation workers exit, then reuses GPU 2; GPU 7 is not reserved. Qwen3.6
+defaults to tensor parallel size 2 and an 80% total-device static-memory target;
+with the retriever already resident this leaves Qwen enough Mamba/KV cache while retaining
+headroom. Override
 `TRAIN_GPU_DEVICES` or `GENERATION_GPU_DEVICES` if your placement differs. Each
 judge-dependent stage checks `/v1/models` before starting.
+
+Start all three persistent services/jobs with the checked-in tmux launcher:
+
+```bash
+bash start_training_tmux.sh
+```
+
+It creates (or preserves) the `retriever`, `qwen36`, and `training` sessions.
 
 **1. Train Proposer:**
 Train the proposer agent to generate challenging yet manageable questions for the base solver.

@@ -49,9 +49,20 @@ verify:
     timeout_seconds: 120
     max_retries: 3
     max_concurrency: 32
+  # main_generation releases all generation workers, then starts this solver only
+  # for the serial verify phase. Training scripts opt in explicitly.
+  local_server:
+    enabled: false
+    model_path: ${verify.solver_model.model_name}
+    gpu_devices: "2"
+    port: 8001
+    tp_size: 1
+    mem_fraction_static: 0.8
+    startup_timeout_seconds: 300
+    log_path: logs/verify_solver.log
 
 keepout_eval:
-  retrieval_service_url: "http://222.29.51.205:8020/retrieve"
+  retrieval_service_url: ${oc.env:DRZERO_RETRIEVER_URL,"http://127.0.0.1:8020/retrieve"}
   topk: 3
   max_turns: 5
   solver_model:

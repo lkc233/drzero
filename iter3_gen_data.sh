@@ -3,13 +3,13 @@
 
 set -x
 
-export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-4,5,6,7}"
+export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-2,3,4,5,6,7}"
 
 # Keep :8000 alive: it is the local Qwen3.6 judge/updater service.
 
 tp=1
-dp=4
-gpus=4
+dp=6
+gpus=6
 sample_size=5
 rollout_memory_utilization=0.8
 
@@ -21,8 +21,17 @@ fi
 algorithm=grpo_batch
 grpo_group_size=1
 reward_group_size=5
-model=Qwen/Qwen2.5-3B-Instruct
+model=Qwen/Qwen3-4B-Instruct-2507
 model_name=$(basename "$model" | tr '[:upper:]' '[:lower:]')
+
+cur_iter=3
+prev_iter=2
+solver_algorithm=grpo
+solver_grpo_group_size=5
+SOLVER_NAME="solver_iter${prev_iter}_hf"
+SOLVER_PATH="./checkpoints/dr-zero/solver_iter${prev_iter}_ratio${hop_ratio}_${solver_algorithm}_group${solver_grpo_group_size}_${model_name}/${SOLVER_NAME}"
+STATE="./iterations/iter_${cur_iter}/state.json"
+export DRZERO_ITERATION_STATE="$STATE"
 
 challenger_step=150
 data_partition=3
@@ -49,6 +58,12 @@ python -m verl.trainer.main_generation \
     +data.partition=$data_partition \
     +data.batch_size=512 \
     +data.output_path=$TRAIN_DATA_OUT \
+    iteration.state_path="$STATE" \
+    verify.solver_model.base_url="http://127.0.0.1:8001" \
+    verify.solver_model.model_name="$SOLVER_NAME" \
+    verify.local_server.enabled=true \
+    verify.local_server.model_path="$SOLVER_PATH" \
+    verify.local_server.gpu_devices="${VERIFY_GPU_DEVICE:-2}" \
     actor_rollout_ref.model.path=$model \
     actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.n=${sample_size} \
