@@ -44,6 +44,8 @@ bash setup_retriever.sh
 
 By default, the retriever environment is `.venv-retriever`, the index and corpus are stored under `data/retriever`, and the server listens on port 8000. Set `RETRIEVER_PORT` to override the port. Run `bash setup_retriever.sh --no-launch` to prepare without launching.
 
+`FAISS_USE_GPU=auto` is the default. It uses FAISS GPU kernels on supported NVIDIA GPUs and automatically keeps the index on CPU for Hopper/H100 GPUs, which are unsupported by the prebuilt FAISS wheel. Set `FAISS_USE_GPU=1` or `FAISS_USE_GPU=0` to force either mode.
+
 **Manual Download & Index Alternative:**
 Execute the following commands to download the Wikipedia English dump and build the faiss index for the retriever (default: `intfloat/e5-base-v2`). More details can be found under the search folder and the [Search-R1 repository](https://github.com/PeterGriffinJin/Search-R1).
 

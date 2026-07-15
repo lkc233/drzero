@@ -34,6 +34,7 @@ export HF_HOME="${HF_HOME:-$SCRIPT_DIR/.cache/huggingface}"
 
 # Retriever config: e5_flat (GPU, accurate), e5_hnsw (CPU, fast), or bm25 (CPU, sparse)
 RETRIEVER_TYPE="${RETRIEVER_TYPE:-e5_flat}"
+FAISS_USE_GPU="${FAISS_USE_GPU:-auto}"          # auto, 1 (force GPU), or 0 (CPU index)
 
 # Server config
 RETRIEVER_PORT="${RETRIEVER_PORT:-8000}"
@@ -57,6 +58,20 @@ done
 
 log() { echo -e "\n\033[1;32m[setup_retriever]\033[0m $*"; }
 info() { echo -e "\033[1;34m[setup_retriever]\033[0m $*"; }
+
+faiss_gpu_supported() {
+    "$RETRIEVER_VENV_DIR/bin/python" - <<'PY'
+import sys
+import torch
+
+if not torch.cuda.is_available():
+    sys.exit(1)
+
+# The PyPI faiss-gpu-cu12 wheels do not contain kernels for Hopper (sm_90).
+capability = torch.cuda.get_device_capability(0)
+sys.exit(0 if capability < (9, 0) else 1)
+PY
+}
 
 # --------------------------------------------------------------------------- #
 # Locate uv
@@ -168,6 +183,26 @@ stage_launch() {
     case "$RETRIEVER_TYPE" in
         e5_flat)
             export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
+            local faiss_gpu_args=()
+            case "$FAISS_USE_GPU" in
+                1|true)
+                    faiss_gpu_args=(--faiss_gpu)
+                    ;;
+                0|false)
+                    info "Using the FAISS index on CPU (FAISS_USE_GPU=$FAISS_USE_GPU)."
+                    ;;
+                auto)
+                    if faiss_gpu_supported; then
+                        faiss_gpu_args=(--faiss_gpu)
+                    else
+                        info "FAISS GPU kernels do not support this GPU; using the index on CPU."
+                    fi
+                    ;;
+                *)
+                    echo "ERROR: FAISS_USE_GPU must be auto, 1, or 0 (got '$FAISS_USE_GPU')." >&2
+                    exit 1
+                    ;;
+            esac
             "$RETRIEVER_VENV_DIR/bin/python" "$server" \
                 --index_path "$DATA_DIR/e5_Flat.index" \
                 --corpus_path "$corpus_file" \
@@ -175,7 +210,7 @@ stage_launch() {
                 --port "$RETRIEVER_PORT" \
                 --retriever_name e5 \
                 --retriever_model "$RETRIEVER_MODEL" \
-                --faiss_gpu
+                "${faiss_gpu_args[@]}"
             ;;
         e5_hnsw)
             "$RETRIEVER_VENV_DIR/bin/python" "$server" \
