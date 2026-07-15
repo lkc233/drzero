@@ -8,6 +8,7 @@ tmp*
 .venv/
 .venv-retriever/
 /.cache/
+/Search-R1/
 
 /.ipynb_checkpoints/*
 .vscode/*

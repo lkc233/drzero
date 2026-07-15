@@ -7,14 +7,14 @@
 #   1. Create a uv-managed virtual environment (torch + faiss-gpu + pyserini ...)
 #   2. Download the wiki-18 index + corpus from HuggingFace
 #   3. Prepare the data (concatenate index shards, decompress corpus)
-#   4. Launch the local retrieval server (FastAPI, port 8020 by default)
+#   4. Launch the local retrieval server (FastAPI, port 8000 by default)
 #
 # It is idempotent: finished stages are detected and skipped on re-run.
 #
 # Usage:
 #   bash setup_retriever.sh                # run all stages, then launch
 #   RETRIEVER_TYPE=bm25 bash setup_retriever.sh
-#   GPU_DEVICES=0,1 PORT=8020 bash setup_retriever.sh
+#   GPU_DEVICES=0,1 PORT=8000 bash setup_retriever.sh
 #   bash setup_retriever.sh --no-launch    # set everything up but do not launch
 #   bash setup_retriever.sh --launch-only  # only (re)launch the server
 #
@@ -36,10 +36,10 @@ export HF_HOME="${HF_HOME:-$SCRIPT_DIR/.cache/huggingface}"
 RETRIEVER_TYPE="${RETRIEVER_TYPE:-e5_flat}"
 
 # Server config
-# NOTE: retrieval_server.py hardcodes host=0.0.0.0 and port=8020. PORT below is
+# NOTE: retrieval_server.py hardcodes host=0.0.0.0 and port=8000. PORT below is
 # only used for messages/checks; to actually change it, edit the uvicorn.run(...)
 # line at the bottom of search/retrieval_server.py.
-PORT="${PORT:-8020}"
+PORT="${PORT:-8000}"
 TOPK="${TOPK:-3}"
 GPU_DEVICES="${GPU_DEVICES:-0,1}"                # used by e5_flat only
 RETRIEVER_MODEL="${RETRIEVER_MODEL:-intfloat/e5-base-v2}"
@@ -91,7 +91,7 @@ stage_env() {
 }
 
 # --------------------------------------------------------------------------- #
-# Stage 3 + 4: Download + prepare index/corpus
+# Stage 2 + 3: Download + prepare index/corpus
 # --------------------------------------------------------------------------- #
 stage_data() {
     mkdir -p "$DATA_DIR"
@@ -104,7 +104,7 @@ stage_data() {
             if [ -f "$index_file" ]; then
                 log "Index $index_file already exists — skipping download."
             else
-                log "Downloading e5 flat index + corpus from HuggingFace ..."
+                log "Downloading e5 flat index from HuggingFace ..."
                 "$RETRIEVER_VENV_DIR/bin/python" "$SCRIPT_DIR/scripts/download.py" --save_path "$DATA_DIR"
                 log "Concatenating index shards -> $index_file ..."
                 cat "$DATA_DIR"/part_* > "$index_file"
@@ -119,11 +119,6 @@ stage_data() {
                 "$RETRIEVER_VENV_DIR/bin/hf" download \
                     PeterJinGo/wiki-18-e5-index-HNSW64 --repo-type dataset --local-dir "$DATA_DIR"
                 cat "$DATA_DIR"/part_* > "$index_file"
-                # HNSW download does not include the corpus; grab it from the e5-index repo
-                if [ ! -f "$corpus_file" ] && [ ! -f "$corpus_file.gz" ]; then
-                    "$RETRIEVER_VENV_DIR/bin/hf" download \
-                        PeterJinGo/wiki-18-corpus wiki-18.jsonl.gz --repo-type dataset --local-dir "$DATA_DIR"
-                fi
             fi
             ;;
         bm25)
@@ -142,28 +137,35 @@ stage_data() {
             ;;
     esac
 
+    if [ ! -f "$corpus_file" ] && [ ! -f "$corpus_file.gz" ]; then
+        log "Downloading wiki-18 corpus from HuggingFace ..."
+        "$RETRIEVER_VENV_DIR/bin/hf" download \
+            PeterJinGo/wiki-18-corpus wiki-18.jsonl.gz --repo-type dataset --local-dir "$DATA_DIR"
+    fi
+
     # Decompress corpus if needed
     if [ -f "$corpus_file.gz" ] && [ ! -f "$corpus_file" ]; then
         log "Decompressing corpus $corpus_file.gz ..."
         gzip -d "$corpus_file.gz"
     fi
     if [ ! -f "$corpus_file" ]; then
-        warn "Corpus file $corpus_file not found — check the download step."
+        echo "ERROR: corpus file $corpus_file not found after download." >&2
+        exit 1
     fi
 }
 
 # --------------------------------------------------------------------------- #
-# Stage 5: Launch the retrieval server
+# Stage 4: Launch the retrieval server
 # --------------------------------------------------------------------------- #
 stage_launch() {
     local server="$SCRIPT_DIR/search/retrieval_server.py"
     local corpus_file="$DATA_DIR/wiki-18.jsonl"
 
-    log "Launching retriever ($RETRIEVER_TYPE) on 0.0.0.0:8020 (topk=$TOPK) ..."
-    warn "Remote training must point its search URL to: http://<this-server-ip>:8020/retrieve"
-    warn "Ensure port 8020 is open in the firewall between the two servers."
-    if [ "$PORT" != "8020" ]; then
-        warn "PORT=$PORT requested but retrieval_server.py is hardcoded to 8020; edit the uvicorn.run(...) line to change it."
+    log "Launching retriever ($RETRIEVER_TYPE) on 0.0.0.0:8000 (topk=$TOPK) ..."
+    warn "Remote training must point its search URL to: http://<this-server-ip>:8000/retrieve"
+    warn "Ensure port 8000 is open in the firewall between the two servers."
+    if [ "$PORT" != "8000" ]; then
+        warn "PORT=$PORT requested but retrieval_server.py is hardcoded to 8000; edit the uvicorn.run(...) line to change it."
     fi
 
     case "$RETRIEVER_TYPE" in

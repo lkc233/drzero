@@ -36,7 +36,15 @@ uv sync --extra training-kernels
 
 This framework relies on a local server with a retriever model. Prepare the corpus and build the index before training.
 
-**Download & Index Corpus:**
+The recommended one-click setup uses this repository's `search/` implementation and an isolated uv environment. All data, environments, and caches remain inside the project directory:
+
+```bash
+bash setup_retriever.sh
+```
+
+By default, the retriever environment is `.venv-retriever`, the index and corpus are stored under `data/retriever`, and the server listens on port 8000. Run `bash setup_retriever.sh --no-launch` to prepare without launching.
+
+**Manual Download & Index Alternative:**
 Execute the following commands to download the Wikipedia English dump and build the faiss index for the retriever (default: `intfloat/e5-base-v2`). More details can be found under the search folder and the [Search-R1 repository](https://github.com/PeterGriffinJin/Search-R1).
 
 ```bash
