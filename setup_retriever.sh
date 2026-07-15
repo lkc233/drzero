@@ -67,9 +67,13 @@ import torch
 if not torch.cuda.is_available():
     sys.exit(1)
 
-# The PyPI faiss-gpu-cu12 wheels do not contain kernels for Hopper (sm_90).
-capability = torch.cuda.get_device_capability(0)
-sys.exit(0 if capability < (9, 0) else 1)
+# The current PyPI faiss-gpu-cu12 wheel contains kernels for sm_70 through
+# sm_89. FAISS clones the index to every visible GPU, so all must be supported.
+capabilities = [
+    torch.cuda.get_device_capability(device)
+    for device in range(torch.cuda.device_count())
+]
+sys.exit(0 if capabilities and all((7, 0) <= cap < (9, 0) for cap in capabilities) else 1)
 PY
 }
 
