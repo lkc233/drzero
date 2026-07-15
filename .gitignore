@@ -6,7 +6,8 @@
 tmp*
 .DS_Store
 .venv/
-/Search-R1/
+.venv-retriever/
+/.cache/
 
 /.ipynb_checkpoints/*
 .vscode/*

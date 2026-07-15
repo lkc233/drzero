@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 #
-# setup_retriever.sh — One-click Search-R1 retriever setup for a fresh server.
+# setup_retriever.sh — One-click Dr. Zero local retriever setup for a fresh server.
 #
 # This script covers every stage needed to bring up a local retriever that a
 # training job on another machine can call over HTTP:
-#   1. Clone the Search-R1 repository
-#   2. Create a uv-managed virtual environment (torch + faiss-gpu + pyserini ...)
-#   3. Download the wiki-18 index + corpus from HuggingFace
-#   4. Prepare the data (concatenate index shards, decompress corpus)
-#   5. Launch the local retrieval server (FastAPI, port 8020 by default)
+#   1. Create a uv-managed virtual environment (torch + faiss-gpu + pyserini ...)
+#   2. Download the wiki-18 index + corpus from HuggingFace
+#   3. Prepare the data (concatenate index shards, decompress corpus)
+#   4. Launch the local retrieval server (FastAPI, port 8020 by default)
 #
 # It is idempotent: finished stages are detected and skipped on re-run.
 #
@@ -25,10 +24,13 @@ set -euo pipefail
 # Configuration (override any of these via environment variables)
 # --------------------------------------------------------------------------- #
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_URL="${REPO_URL:-https://github.com/PeterGriffinJin/Search-R1.git}"
-REPO_DIR="${REPO_DIR:-$SCRIPT_DIR/Search-R1}"    # kept beside this setup script
-RETRIEVER_VENV_DIR="${RETRIEVER_VENV_DIR:-$REPO_DIR/.venv-retriever}" # separate from Dr. Zero's .venv
-DATA_DIR="${DATA_DIR:-$REPO_DIR/retriever/data}" # where to store index/corpus
+RETRIEVER_VENV_DIR="${RETRIEVER_VENV_DIR:-$SCRIPT_DIR/.venv-retriever}"
+DATA_DIR="${DATA_DIR:-$SCRIPT_DIR/data/retriever}"
+
+# Keep tool/model caches out of the ephemeral home directory.
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$SCRIPT_DIR/.cache/uv}"
+export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$SCRIPT_DIR/.cache/uv/python}"
+export HF_HOME="${HF_HOME:-$SCRIPT_DIR/.cache/huggingface}"
 
 # Retriever config: e5_flat (GPU, accurate), e5_hnsw (CPU, fast), or bm25 (CPU, sparse)
 RETRIEVER_TYPE="${RETRIEVER_TYPE:-e5_flat}"
@@ -36,7 +38,7 @@ RETRIEVER_TYPE="${RETRIEVER_TYPE:-e5_flat}"
 # Server config
 # NOTE: retrieval_server.py hardcodes host=0.0.0.0 and port=8020. PORT below is
 # only used for messages/checks; to actually change it, edit the uvicorn.run(...)
-# line at the bottom of search_r1/search/retrieval_server.py.
+# line at the bottom of search/retrieval_server.py.
 PORT="${PORT:-8020}"
 TOPK="${TOPK:-3}"
 GPU_DEVICES="${GPU_DEVICES:-0,1}"                # used by e5_flat only
@@ -70,19 +72,7 @@ init_uv() {
 }
 
 # --------------------------------------------------------------------------- #
-# Stage 1: Clone Search-R1
-# --------------------------------------------------------------------------- #
-stage_clone() {
-    if [ -d "$REPO_DIR/.git" ] || [ -f "$REPO_DIR/setup.py" ]; then
-        log "Repo already present at $REPO_DIR — skipping clone."
-    else
-        log "Cloning Search-R1 into $REPO_DIR ..."
-        git clone "$REPO_URL" "$REPO_DIR"
-    fi
-}
-
-# --------------------------------------------------------------------------- #
-# Stage 2: Create the retriever virtual environment and install dependencies
+# Stage 1: Create the retriever virtual environment and install dependencies
 # --------------------------------------------------------------------------- #
 stage_env() {
     if [ -x "$RETRIEVER_VENV_DIR/bin/python" ]; then
@@ -115,7 +105,7 @@ stage_data() {
                 log "Index $index_file already exists — skipping download."
             else
                 log "Downloading e5 flat index + corpus from HuggingFace ..."
-                "$RETRIEVER_VENV_DIR/bin/python" "$REPO_DIR/scripts/download.py" --save_path "$DATA_DIR"
+                "$RETRIEVER_VENV_DIR/bin/python" "$SCRIPT_DIR/scripts/download.py" --save_path "$DATA_DIR"
                 log "Concatenating index shards -> $index_file ..."
                 cat "$DATA_DIR"/part_* > "$index_file"
             fi
@@ -166,7 +156,7 @@ stage_data() {
 # Stage 5: Launch the retrieval server
 # --------------------------------------------------------------------------- #
 stage_launch() {
-    local server="$REPO_DIR/search_r1/search/retrieval_server.py"
+    local server="$SCRIPT_DIR/search/retrieval_server.py"
     local corpus_file="$DATA_DIR/wiki-18.jsonl"
 
     log "Launching retriever ($RETRIEVER_TYPE) on 0.0.0.0:8020 (topk=$TOPK) ..."
@@ -215,7 +205,6 @@ if [ "$LAUNCH_ONLY" -eq 1 ]; then
     exit 0
 fi
 
-stage_clone
 stage_env
 stage_data
 
