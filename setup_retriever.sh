@@ -86,8 +86,11 @@ stage_env() {
     uv pip install --python "$RETRIEVER_VENV_DIR/bin/python" \
         --index https://download.pytorch.org/whl/cu121 \
         torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
-        faiss-gpu-cu12==1.8.0.2 \
+        faiss-gpu-cu12==1.9.0.post1 \
         transformers datasets pyserini uvicorn fastapi huggingface_hub
+
+    log "Verifying FAISS installation ..."
+    "$RETRIEVER_VENV_DIR/bin/python" -c 'import faiss; print(f"FAISS {faiss.__version__} loaded successfully")'
 }
 
 # --------------------------------------------------------------------------- #
