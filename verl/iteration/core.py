@@ -450,6 +450,24 @@ def normalized_rubric_mean(evaluations: list[RubricEvaluation], rubrics: list[Ru
     return sum((evaluation.score - 1) / 4 for evaluation in evaluations) / len(evaluations)
 
 
+def resolve_rubric_scores(
+    evaluation_groups: list[list[RubricEvaluation] | None],
+    *,
+    neutral_score: float = 0.5,
+) -> tuple[list[float], list[bool]]:
+    if not 0 <= neutral_score <= 1:
+        raise ValueError("neutral rubric score must be in [0, 1]")
+    normalized_scores = [
+        normalized_rubric_mean(evaluations) if evaluations is not None else None
+        for evaluations in evaluation_groups
+    ]
+    valid_scores = [score for score in normalized_scores if score is not None]
+    fallback_score = sum(valid_scores) / len(valid_scores) if valid_scores else neutral_score
+    scores = [score if score is not None else fallback_score for score in normalized_scores]
+    failures = [evaluations is None for evaluations in evaluation_groups]
+    return scores, failures
+
+
 def candidate_rank_score(format_score: float, evaluations: list[RubricEvaluation]) -> float:
     if not 0 <= format_score <= 1:
         raise ValueError("format score must be in [0, 1]")
@@ -464,8 +482,17 @@ def proposer_reward_components(
     format_weight: float = 0.5,
     difficulty_weight: float = 1.0,
     rubric_weight: float = 0.5,
+    rubric_score_override: float | None = None,
 ) -> dict[str, float]:
-    rubric_score = normalized_rubric_mean(evaluations) if evaluations else 0.0
+    rubric_score = (
+        rubric_score_override
+        if rubric_score_override is not None
+        else normalized_rubric_mean(evaluations)
+        if evaluations
+        else 0.0
+    )
+    if not 0 <= rubric_score <= 1:
+        raise ValueError("rubric score must be in [0, 1]")
     weighted_format = format_weight * format_score
     weighted_difficulty = difficulty_weight * difficulty_score
     weighted_rubric = rubric_weight * rubric_score

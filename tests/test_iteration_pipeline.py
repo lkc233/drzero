@@ -11,6 +11,7 @@ from verl.iteration.core import (
     Candidate,
     CandidateJudgment,
     Rubric,
+    RubricEvaluation,
     Skill,
     StateStore,
     TrajectorySummary,
@@ -22,6 +23,7 @@ from verl.iteration.core import (
     initial_skills,
     normalized_rubric_mean,
     proposer_reward_components,
+    resolve_rubric_scores,
     stable_document_id,
     stable_group_split,
     validate_rubrics,
@@ -42,6 +44,8 @@ from verl.iteration.models import (
     TrajectoryAnalyzer,
     UpdateDecision,
     VerifyDecision,
+    evaluate_rubric_rewards,
+    evaluate_rubrics,
     rank_and_verify_candidates,
     validate_evidence_references,
     validate_model_reference,
@@ -58,6 +62,7 @@ from verl.iteration.orchestrator import (
     write_training_data_reference,
 )
 from verl.prompts import build_challenger_prompt
+from verl.trainer.ppo.reward import compute_reward
 
 
 def trajectory(query: str = "bridge entity") -> str:
@@ -128,8 +133,6 @@ def test_rubric_scoring_and_reward_components():
         {"rubric_id": "r1", "score": 1, "reason": "low"},
         {"rubric_id": "r2", "score": 5, "reason": "high"},
     ]
-    from verl.iteration.core import RubricEvaluation
-
     parsed = [RubricEvaluation.model_validate(item) for item in evaluations]
     assert normalized_rubric_mean(parsed) == pytest.approx(0.5)
     assert candidate_rank_score(0.8, parsed) == pytest.approx(0.65)
@@ -137,6 +140,239 @@ def test_rubric_scoring_and_reward_components():
     assert weighted["score"] == pytest.approx(0.9)
     legacy = proposer_reward_components(0.8, 0.25, [], rubric_weight=0)
     assert legacy["score"] == pytest.approx(0.65)
+
+
+def test_failed_rubric_evaluations_use_the_valid_batch_mean():
+    low = [RubricEvaluation(rubric_id="r1", score=1, reason="low")]
+    high = [RubricEvaluation(rubric_id="r1", score=5, reason="high")]
+
+    scores, failures = resolve_rubric_scores([low, None, high])
+
+    assert scores == pytest.approx([0.0, 0.5, 1.0])
+    assert failures == [False, True, False]
+    failed_reward = proposer_reward_components(
+        0.8,
+        0.25,
+        [],
+        rubric_weight=0.5,
+        rubric_score_override=scores[1],
+    )
+    assert failed_reward["score"] == pytest.approx(0.9)
+    assert failed_reward["format_score"] == pytest.approx(0.8)
+    assert failed_reward["difficulty_score"] == pytest.approx(0.25)
+
+
+def test_all_failed_rubric_evaluations_use_a_neutral_score():
+    scores, failures = resolve_rubric_scores([None, None])
+
+    assert scores == pytest.approx([0.5, 0.5])
+    assert failures == [True, True]
+
+
+def test_compute_reward_does_not_repeat_a_failed_batch():
+    calls = 0
+
+    def failing_reward_fn(data, return_dict=False):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("reward failed")
+
+    with pytest.raises(RuntimeError, match="reward failed"):
+        compute_reward(object(), failing_reward_fn)
+
+    assert calls == 1
+
+
+def test_compute_reward_accepts_a_tensor_result_without_repeating_the_batch():
+    calls = 0
+    reward_tensor = object()
+
+    def tensor_reward_fn(data, return_dict=False):
+        nonlocal calls
+        del data, return_dict
+        calls += 1
+        return reward_tensor
+
+    result, extra_info = compute_reward(object(), tensor_reward_fn)
+
+    assert result is reward_tensor
+    assert extra_info == {}
+    assert calls == 1
+
+
+def test_compute_reward_accepts_a_dict_result_with_extra_info():
+    calls = 0
+    reward_tensor = object()
+    reward_extra_info = {"rubric_score": [0.75]}
+
+    def dict_reward_fn(data, return_dict=False):
+        nonlocal calls
+        del data, return_dict
+        calls += 1
+        return {
+            "reward_tensor": reward_tensor,
+            "reward_extra_info": reward_extra_info,
+        }
+
+    result, extra_info = compute_reward(object(), dict_reward_fn)
+
+    assert result is reward_tensor
+    assert extra_info is reward_extra_info
+    assert calls == 1
+
+
+def test_rubric_rewards_only_evaluate_format_valid_candidates():
+    rubrics = initial_rubrics()[:2]
+    candidates = [
+        make_candidate(0, format_score=0.0),
+        make_candidate(1, format_score=0.5),
+    ]
+
+    class CountingClient:
+        def __init__(self):
+            self.prompts = []
+
+        async def complete_structured(self, prompt, response_model):
+            self.prompts.append(prompt)
+            payload = {
+                "evaluations": [
+                    {"rubric_id": rubric.id, "score": 5, "reason": "supported"}
+                    for rubric in rubrics
+                ]
+            }
+            return response_model.model_validate(payload), json.dumps(payload), 0.0
+
+    client = CountingClient()
+    evaluations, scores, failures = asyncio.run(
+        evaluate_rubric_rewards(candidates, rubrics, client)
+    )
+
+    assert len(client.prompts) == 1
+    assert "Question: q-1" in client.prompts[0]
+    assert evaluations[0] == []
+    assert scores == pytest.approx([0.0, 1.0])
+    assert failures == [False, False]
+    invalid_reward = proposer_reward_components(
+        candidates[0].format_score,
+        0.0,
+        evaluations[0],
+        rubric_score_override=scores[0],
+    )
+    assert invalid_reward["rubric_score"] == 0.0
+    assert invalid_reward["score"] == 0.0
+
+
+def test_rubric_rewards_isolate_permanent_failures_and_report_them(caplog):
+    rubrics = initial_rubrics()[:2]
+    candidates = [make_candidate(index) for index in range(3)]
+
+    class PartiallyFailingClient:
+        async def complete_structured(self, prompt, response_model):
+            score = 1 if "Question: q-0" in prompt else 5
+            active_rubrics = rubrics[:1] if "Question: q-1" in prompt else rubrics
+            payload = {
+                "evaluations": [
+                    {"rubric_id": rubric.id, "score": score, "reason": "judge result"}
+                    for rubric in active_rubrics
+                ]
+            }
+            return response_model.model_validate(payload), json.dumps(payload), 0.0
+
+    with caplog.at_level("WARNING", logger="verl.iteration.models"):
+        evaluations, scores, failures = asyncio.run(
+            evaluate_rubric_rewards(candidates, rubrics, PartiallyFailingClient())
+        )
+
+    assert [len(items) for items in evaluations] == [2, 0, 2]
+    assert scores == pytest.approx([0.0, 0.5, 1.0])
+    assert failures == [False, True, False]
+    assert "Rubric evaluation failed for candidate-1" in caplog.text
+    assert "raw_output" in caplog.text
+
+
+def test_rubric_evaluation_retries_incomplete_coverage():
+    rubrics = initial_rubrics()[:2]
+
+    class CoverageRetryClient:
+        def __init__(self):
+            self.calls = 0
+            self.prompts = []
+
+        async def complete_structured(self, prompt, response_model):
+            self.calls += 1
+            self.prompts.append(prompt)
+            evaluations = [
+                {"rubric_id": rubrics[0].id, "score": 3, "reason": "first"},
+            ]
+            if self.calls == 2:
+                evaluations.append(
+                    {"rubric_id": rubrics[1].id, "score": 4, "reason": "second"}
+                )
+            payload = {"evaluations": evaluations}
+            return payload, json.dumps(payload), 0.0
+
+    client = CoverageRetryClient()
+    evaluations, _ = asyncio.run(
+        evaluate_rubrics(make_candidate(0), rubrics, client, max_attempts=2)
+    )
+
+    assert client.calls == 2
+    expected_ids = json.dumps(sorted(rubric.id for rubric in rubrics), ensure_ascii=False)
+    assert f"rubric id in this list: {expected_ids}." in client.prompts[1]
+    assert {item.rubric_id for item in evaluations} == {item.id for item in rubrics}
+
+
+def test_rubric_evaluation_rejects_duplicate_ids():
+    rubrics = initial_rubrics()[:2]
+
+    class DuplicateRubricClient:
+        async def complete_structured(self, prompt, response_model):
+            del prompt
+            payload = {
+                "evaluations": [
+                    {"rubric_id": rubrics[0].id, "score": 3, "reason": "first"},
+                    {"rubric_id": rubrics[0].id, "score": 4, "reason": "duplicate"},
+                ]
+            }
+            return response_model.model_validate(payload), json.dumps(payload), 0.0
+
+    with pytest.raises(ModelCallError, match="failed after 1 attempts") as raised:
+        asyncio.run(
+            evaluate_rubrics(
+                make_candidate(0),
+                rubrics,
+                DuplicateRubricClient(),
+                max_attempts=1,
+            )
+        )
+
+    assert raised.value.details["attempts"][0]["reason"] == (
+        "rubric response must cover every active rubric exactly once"
+    )
+
+
+def test_rubric_evaluation_does_not_outer_retry_transport_failures():
+    class TransportFailureClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete_structured(self, prompt, response_model):
+            del prompt, response_model
+            self.calls += 1
+            raise ModelCallError("transport retries exhausted")
+
+    client = TransportFailureClient()
+    with pytest.raises(ModelCallError, match="transport retries exhausted"):
+        asyncio.run(
+            evaluate_rubrics(
+                make_candidate(0),
+                initial_rubrics()[:2],
+                client,
+                max_attempts=3,
+            )
+        )
+
+    assert client.calls == 1
 
 
 def test_dynamic_schema_limits_and_verify_contract():

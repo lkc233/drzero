@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
@@ -24,6 +25,7 @@ from verl.iteration.core import (
     VerifyResult,
     candidate_rank_score,
     diff_by_id,
+    resolve_rubric_scores,
     validate_rubrics,
     validate_skills,
 )
@@ -39,6 +41,8 @@ from verl.prompts import (
     VERIFIER_PROMPT,
     VERIFY_JUDGE_PROMPT,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ModelCallError(RuntimeError):
@@ -463,7 +467,11 @@ async def evaluate_rubrics(
     candidate: Candidate,
     rubrics: list[Rubric],
     judge_client: OpenAICompatibleClient,
+    *,
+    max_attempts: int = 3,
 ) -> tuple[list[RubricEvaluation], str]:
+    if max_attempts < 1:
+        raise ValueError("rubric evaluation max_attempts must be positive")
     prompt = RUBRIC_EVALUATION_PROMPT.format(
         rubrics=json.dumps([item.model_dump(mode="json") for item in rubrics], ensure_ascii=False),
         source_document=candidate.source_document,
@@ -471,16 +479,92 @@ async def evaluate_rubrics(
         question=candidate.question,
         reference_answer=candidate.reference_answer,
     )
-    response_model, raw, _ = await judge_client.complete_structured(prompt, RubricEvaluationResponse)
-    response = RubricEvaluationResponse.model_validate(response_model)
     expected = {rubric.id for rubric in rubrics}
-    actual = {evaluation.rubric_id for evaluation in response.evaluations}
-    if expected != actual or len(actual) != len(response.evaluations):
-        raise ModelCallError(
+    attempt_prompt = prompt
+    failures: list[dict[str, Any]] = []
+    last_error: ModelCallError | None = None
+    for attempt in range(1, max_attempts + 1):
+        response_model, raw, _ = await judge_client.complete_structured(
+            attempt_prompt,
+            RubricEvaluationResponse,
+        )
+        response = RubricEvaluationResponse.model_validate(response_model)
+        actual = {evaluation.rubric_id for evaluation in response.evaluations}
+        if expected == actual and len(actual) == len(response.evaluations):
+            return response.evaluations, raw
+
+        last_error = ModelCallError(
             "rubric response must cover every active rubric exactly once",
             details={"raw_output": raw},
         )
-    return response.evaluations, raw
+        failures.append(
+            {
+                "attempt": attempt,
+                "error_type": type(last_error).__name__,
+                "reason": str(last_error),
+                "raw_output": raw,
+                "details": last_error.details,
+            }
+        )
+        if attempt < max_attempts:
+            attempt_prompt = (
+                prompt
+                + "\n\nThe previous response was invalid. Return exactly one evaluation for each "
+                + f"rubric id in this list: {json.dumps(sorted(expected), ensure_ascii=False)}."
+            )
+    raise ModelCallError(
+        f"rubric evaluation failed after {max_attempts} attempts",
+        details={"attempts": failures},
+    ) from last_error
+
+
+async def evaluate_rubric_rewards(
+    candidates: list[Candidate],
+    rubrics: list[Rubric],
+    judge_client: OpenAICompatibleClient,
+) -> tuple[list[list[RubricEvaluation]], list[float], list[bool]]:
+    """Evaluate and score only candidates that passed the proposer format gate."""
+    evaluations_by_candidate: list[list[RubricEvaluation]] = [[] for _ in candidates]
+    scores_by_candidate = [0.0 for _ in candidates]
+    failures_by_candidate = [False for _ in candidates]
+    eligible = [
+        (index, candidate)
+        for index, candidate in enumerate(candidates)
+        if candidate.format_score > 0
+    ]
+    if not eligible:
+        return evaluations_by_candidate, scores_by_candidate, failures_by_candidate
+
+    outputs = await asyncio.gather(
+        *(evaluate_rubrics(candidate, rubrics, judge_client) for _, candidate in eligible),
+        return_exceptions=True,
+    )
+    evaluation_groups: list[list[RubricEvaluation] | None] = []
+    for (_, candidate), output in zip(eligible, outputs, strict=True):
+        if isinstance(output, BaseException):
+            evaluation_groups.append(None)
+            logger.warning(
+                "Rubric evaluation failed for %s: %s; details=%s",
+                candidate.candidate_id,
+                output,
+                json.dumps(getattr(output, "details", {}), ensure_ascii=False, default=str),
+            )
+        else:
+            evaluations, _ = output
+            evaluation_groups.append(evaluations)
+
+    eligible_scores, eligible_failures = resolve_rubric_scores(evaluation_groups)
+    for (index, _), evaluations, score, failed in zip(
+        eligible,
+        evaluation_groups,
+        eligible_scores,
+        eligible_failures,
+        strict=True,
+    ):
+        evaluations_by_candidate[index] = evaluations or []
+        scores_by_candidate[index] = score
+        failures_by_candidate[index] = failed
+    return evaluations_by_candidate, scores_by_candidate, failures_by_candidate
 
 
 async def rank_and_verify_candidates(

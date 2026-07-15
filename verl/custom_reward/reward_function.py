@@ -1,6 +1,3 @@
-import asyncio
-
-from verl.utils.asyncio_utils import get_or_create_event_loop
 import json
 import logging
 import os
@@ -26,7 +23,7 @@ from verl.iteration.core import (
 from verl.iteration.models import (
     EndpointConfig,
     OpenAICompatibleClient,
-    evaluate_rubrics,
+    evaluate_rubric_rewards,
     validate_model_reference,
 )
 from verl.prompts import (
@@ -39,6 +36,7 @@ from verl.prompts import (
     TOOL_CALL_PATTERN,
     TOOL_RESPONSE_PATTERN,
 )
+from verl.utils.asyncio_utils import get_or_create_event_loop
 from verl.utils.model import compute_position_id_with_mask
 
 logger = logging.getLogger(__file__)
@@ -307,6 +305,8 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
     difficulty_weight = float(reward_config.get("difficulty_weight", 1.0))
     rubric_weight = float(reward_config.get("rubric_weight", 0.0))
     rubric_evaluations = [[] for _ in format_scores]
+    rubric_score_overrides = [None for _ in format_scores]
+    rubric_evaluation_failures = [False for _ in format_scores]
 
     if rubric_weight:
         iteration_state_path = kwargs.get("iteration_state_path")
@@ -364,12 +364,17 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
 
         async def _compute_rubric_evaluations():
             async with OpenAICompatibleClient(endpoint_config) as meta_client:
-                return await asyncio.gather(
-                    *(evaluate_rubrics(candidate, state.rubrics, meta_client) for candidate in candidates)
+                return await evaluate_rubric_rewards(
+                    candidates,
+                    state.rubrics,
+                    meta_client,
                 )
 
-        rubric_outputs = loop.run_until_complete(_compute_rubric_evaluations())
-        rubric_evaluations = [evaluations for evaluations, _ in rubric_outputs]
+        (
+            rubric_evaluations,
+            rubric_score_overrides,
+            rubric_evaluation_failures,
+        ) = loop.run_until_complete(_compute_rubric_evaluations())
 
     final_scores = [
         proposer_reward_components(
@@ -379,14 +384,18 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
             format_weight=format_weight,
             difficulty_weight=difficulty_weight,
             rubric_weight=rubric_weight,
+            rubric_score_override=rubric_score,
         )
-        for format_score, difficulty_score, evaluations in zip(
+        for format_score, difficulty_score, evaluations, rubric_score in zip(
             format_scores,
             difficulty_scores,
             rubric_evaluations,
+            rubric_score_overrides,
             strict=True,
         )
     ]
+    for score, failed in zip(final_scores, rubric_evaluation_failures, strict=True):
+        score["rubric_evaluation_failed"] = float(failed)
 
     example_idx = gen_batch_ids[0] if gen_batch_ids else 0
     example_solver_responses = grouped_preds[0] if grouped_preds else []
@@ -395,6 +404,7 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
         f"🚀 Difficulty rewards: Avg {np.mean(difficulty_scores)}, Max {np.max(difficulty_scores)}\n"
         f"🚀 Rubric rewards: Avg {np.mean([item['rubric_score'] for item in final_scores])}, "
         f"Max {np.max([item['rubric_score'] for item in final_scores])}\n"
+        f"🚨 Rubric evaluation failures: {sum(rubric_evaluation_failures)}\n"
         f"🚀 Final rewards: Avg {np.mean([item['score'] for item in final_scores])}, "
         f"Max {np.max([item['score'] for item in final_scores])}\n"
         f"🧑‍🏫 Challenger question: {raw_qs[example_idx]}\n"
