@@ -62,18 +62,38 @@ info() { echo -e "\033[1;34m[setup_retriever]\033[0m $*"; }
 faiss_gpu_supported() {
     "$RETRIEVER_VENV_DIR/bin/python" - <<'PY'
 import sys
+import faiss
+import numpy as np
 import torch
 
 if not torch.cuda.is_available():
     sys.exit(1)
 
-# The current PyPI faiss-gpu-cu12 wheel contains kernels for sm_70 through
-# sm_89. FAISS clones the index to every visible GPU, so all must be supported.
-capabilities = [
-    torch.cuda.get_device_capability(device)
-    for device in range(torch.cuda.device_count())
-]
-sys.exit(0 if capabilities and all((7, 0) <= cap < (9, 0) for cap in capabilities) else 1)
+# Exercise the same float16, all-GPU cloning path used by DenseRetriever.
+vectors = np.arange(4096, dtype=np.float32).reshape(32, 128)
+index = faiss.IndexFlatL2(128)
+index.add(vectors)
+options = faiss.GpuMultipleClonerOptions()
+options.useFloat16 = True
+options.shard = True
+gpu_index = faiss.index_cpu_to_all_gpus(index, co=options)
+_, neighbors = gpu_index.search(vectors[:1], 1)
+sys.exit(0 if neighbors[0, 0] == 0 else 1)
+PY
+}
+
+faiss_cuda_archs() {
+    "$RETRIEVER_VENV_DIR/bin/python" - <<'PY'
+import torch
+
+architectures = sorted({
+    major * 10 + minor
+    for major, minor in (
+        torch.cuda.get_device_capability(device)
+        for device in range(torch.cuda.device_count())
+    )
+})
+print(";".join(map(str, architectures)))
 PY
 }
 
@@ -102,8 +122,26 @@ stage_env() {
     uv pip install --python "$RETRIEVER_VENV_DIR/bin/python" \
         --index https://download.pytorch.org/whl/cu121 \
         torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
-        faiss-gpu-cu12==1.9.0.post1 \
         transformers datasets pyserini uvicorn fastapi huggingface_hub
+
+    local cuda_archs
+    cuda_archs="$(faiss_cuda_archs)"
+    if [[ ";$cuda_archs;" == *";90;"* ]]; then
+        if faiss_gpu_supported 2>/dev/null; then
+            log "Existing FAISS build already passes the GPU kernel test."
+        else
+            log "Building FAISS GPU from source for CUDA architectures $cuda_archs ..."
+            RETRIEVER_VENV_DIR="$RETRIEVER_VENV_DIR" \
+            FAISS_CUDA_ARCHS="$cuda_archs" \
+            FAISS_BUILD_CACHE_DIR="$SCRIPT_DIR/.cache/faiss-build" \
+                bash "$SCRIPT_DIR/scripts/build_faiss_gpu.sh"
+        fi
+    else
+        uv pip install --python "$RETRIEVER_VENV_DIR/bin/python" \
+            --index https://download.pytorch.org/whl/cu121 \
+            torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+            faiss-gpu-cu12==1.9.0.post1
+    fi
 
     log "Verifying FAISS installation ..."
     "$RETRIEVER_VENV_DIR/bin/python" -c 'import faiss; print(f"FAISS {faiss.__version__} loaded successfully")'
