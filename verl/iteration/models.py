@@ -86,6 +86,33 @@ class VerifyDecision(StrictModel):
     passed: bool
     reason: str
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_candidate_judgment_shorthand(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or not isinstance(value.get("candidate_judgments"), list):
+            return value
+        shorthand = {
+            "semantically_equivalent": True,
+            "not_semantically_equivalent": False,
+        }
+        normalized = []
+        changed = False
+        for candidate_index, judgment in enumerate(value["candidate_judgments"]):
+            if isinstance(judgment, str) and judgment in shorthand:
+                normalized.append(
+                    {
+                        "candidate_index": candidate_index,
+                        "semantically_equivalent": shorthand[judgment],
+                        "reason": f"judge shorthand: {judgment}",
+                    }
+                )
+                changed = True
+            else:
+                normalized.append(judgment)
+        if not changed:
+            return value
+        return {**value, "candidate_judgments": normalized}
+
     @model_validator(mode="after")
     def validate_passed(self) -> VerifyDecision:
         expected = (

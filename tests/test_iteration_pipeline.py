@@ -576,6 +576,39 @@ def test_dynamic_schema_limits_and_verify_contract():
     assert [item["after"]["id"] for item in skill_diff["modified"]] == [next_skills[0].id]
 
 
+def test_verify_decision_accepts_indexed_semantic_judgment_shorthand():
+    decision = VerifyDecision.model_validate(
+        {
+            "evidence_support": True,
+            "question_is_determinate": True,
+            "candidate_judgments": [
+                "semantically_equivalent",
+                "not_semantically_equivalent",
+                "semantically_equivalent",
+            ],
+            "passed": True,
+            "reason": "The first and third candidate answers match.",
+        }
+    )
+
+    assert [item.candidate_index for item in decision.candidate_judgments] == [0, 1, 2]
+    assert [item.semantically_equivalent for item in decision.candidate_judgments] == [
+        True,
+        False,
+        True,
+    ]
+    with pytest.raises(ValueError, match="candidate_judgments.0"):
+        VerifyDecision.model_validate(
+            {
+                "evidence_support": True,
+                "question_is_determinate": True,
+                "candidate_judgments": ["equivalent"],
+                "passed": True,
+                "reason": "Unsupported shorthand must remain invalid.",
+            }
+        )
+
+
 def test_stable_group_split_never_leaks_doc_ids():
     candidates = [
         make_candidate(index, doc_id=f"doc-{index // 2}")
