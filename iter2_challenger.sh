@@ -15,8 +15,8 @@ if [ -n "$existing_server_pids" ]; then kill -9 $existing_server_pids; fi
 cur_iter=2
 prev_iter=1
 
-tp=2
-dp=3
+tp=1
+dp=6
 gpus=6
 batch_per_gpu=2
 rollout_memory_utilization=0.25

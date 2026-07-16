@@ -1,5 +1,6 @@
 import asyncio
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -11,6 +12,16 @@ from verl.iteration.models import EndpointConfig, OpenAICompatibleClient
 from verl.single_controller.ray.base import wrap_worker_cls_with_env
 from verl.trainer.ppo.ray_trainer import compute_rollout_timing_metrics
 from verl.tools.schemas import OpenAIFunctionToolSchema
+
+
+def test_challenger_rollouts_use_one_model_replica_per_gpu():
+    for iteration in range(1, 4):
+        script = Path(f"iter{iteration}_challenger.sh").read_text()
+
+        assert "tp=1\n" in script
+        assert "dp=6\n" in script
+        assert "--tp-size=${tp}" in script
+        assert "--dp-size=${dp}" in script
 
 
 def test_standalone_worker_receives_environment_before_base_init(monkeypatch):
