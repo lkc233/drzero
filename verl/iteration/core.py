@@ -103,6 +103,7 @@ class Candidate(StrictModel):
     question: str
     reference_answer: str
     format_score: float = Field(ge=0, le=1)
+    format_failure: dict[str, Any] | None = None
     rubric_evaluation: list[RubricEvaluation] = Field(default_factory=list)
     rubric_raw_output: str = ""
     rubric_failure: dict[str, Any] | None = None
@@ -110,6 +111,7 @@ class Candidate(StrictModel):
     generation_index: int = Field(default=0, ge=0)
     status: Literal[
         "generated",
+        "format_invalid",
         "ranked",
         "rubric_error",
         "verify_passed",
@@ -394,15 +396,19 @@ def extract_evidence_bundle(
     responses: list[tuple[int, str | dict[str, Any]]] = []
 
     for index, message in enumerate(normalized_trajectory):
-        content = str(message.get("content") or "")
+        raw_content = message.get("content")
+        content = str(raw_content or "")
         tool_calls = message.get("tool_calls")
         if tool_calls:
             for tool_call in tool_calls:
                 calls.append((index, _parse_tool_call(tool_call)))
         for raw_call in re.findall(r"<tool_call>(.*?)</tool_call>", content, re.DOTALL):
             calls.append((index, _parse_tool_call(raw_call)))
-        for raw_response in re.findall(r"<tool_response>(.*?)</tool_response>", content, re.DOTALL):
-            responses.append((index, raw_response))
+        if message.get("role") == "tool":
+            responses.append((index, raw_content))
+        else:
+            for raw_response in re.findall(r"<tool_response>(.*?)</tool_response>", content, re.DOTALL):
+                responses.append((index, raw_response))
 
     expected_searches = max(0, hop_count - 1)
     if len(calls) != expected_searches:

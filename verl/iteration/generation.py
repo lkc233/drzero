@@ -12,11 +12,13 @@ import pandas as pd
 
 from verl.iteration.core import (
     Candidate,
+    EvidenceItem,
     IterationState,
     atomic_write_json,
     canonical_hash,
     dynamic_state_hash,
     extract_evidence_bundle,
+    normalize_trajectory,
     stable_group_split,
 )
 from verl.prompts import DEFAULT_SOLVER_PREFIX
@@ -58,11 +60,39 @@ def build_candidate(
             f"{missing}; regenerate it with process_train.py"
         )
     source_document = metadata["source_document"]
-    normalized_trajectory, evidence = extract_evidence_bundle(
-        source_document,
-        trajectory,
-        hop_count=hop_count,
-    )
+    candidate_format_score = float(format_score)
+    format_failure = None
+    try:
+        normalized_trajectory, evidence = extract_evidence_bundle(
+            source_document,
+            trajectory,
+            hop_count=hop_count,
+        )
+    except ValueError as error:
+        # Proposer output is sampled, so malformed tool markup is an expected
+        # per-candidate format failure rather than a fatal generation error.
+        normalized_trajectory = normalize_trajectory(trajectory)
+        evidence = [
+            EvidenceItem(
+                evidence_id="evidence-0",
+                kind="seed_document",
+                content=source_document,
+                source="seed_document",
+                trajectory_index=0,
+            )
+        ]
+        candidate_format_score = 0.0
+        format_failure = {
+            "error_type": type(error).__name__,
+            "reason": str(error),
+        }
+
+    status = "generated" if candidate_format_score > 0 else "format_invalid"
+    if status == "format_invalid" and format_failure is None:
+        format_failure = {
+            "error_type": "FormatScoreError",
+            "reason": "proposer format score is zero",
+        }
     return Candidate(
         candidate_id=candidate_id(
             iteration=state.iteration,
@@ -79,8 +109,10 @@ def build_candidate(
         evidence_bundle=evidence,
         question=question,
         reference_answer=reference_answer,
-        format_score=float(format_score),
+        format_score=candidate_format_score,
+        format_failure=format_failure,
         generation_index=generation_index,
+        status=status,
     )
 
 
@@ -252,12 +284,12 @@ def candidate_group_is_complete(candidates: list[Candidate], *, verify_enabled: 
     if not candidates:
         return False
     if not verify_enabled:
-        return all(candidate.status == "not_verified" for candidate in candidates)
+        return all(candidate.status in {"format_invalid", "not_verified"} for candidate in candidates)
     passed = [candidate for candidate in candidates if candidate.status == "verify_passed"]
     if len(passed) == 1:
-        allowed = {"verify_passed", "verify_failed", "not_verified"}
+        allowed = {"format_invalid", "verify_passed", "verify_failed", "not_verified"}
         return all(candidate.status in allowed for candidate in candidates)
-    return not passed and all(candidate.status == "verify_failed" for candidate in candidates)
+    return not passed and all(candidate.status in {"format_invalid", "verify_failed"} for candidate in candidates)
 
 
 def reset_candidate_group(candidates: list[Candidate]) -> None:
@@ -266,7 +298,7 @@ def reset_candidate_group(candidates: list[Candidate]) -> None:
         candidate.rubric_raw_output = ""
         candidate.rubric_failure = None
         candidate.rank_score = 0
-        candidate.status = "generated"
+        candidate.status = "generated" if candidate.format_score > 0 else "format_invalid"
         candidate.verify_result = None
         candidate.verify_failure = None
 
@@ -373,6 +405,8 @@ def build_generation_summary(
     for group in candidate_groups:
         ordered = sorted(group, key=lambda item: (-item.rank_score, item.generation_index))
         for rank, candidate in enumerate(ordered, start=1):
+            if candidate.status == "format_invalid":
+                failure_reasons["format_invalid"] += 1
             if candidate.status in {"verify_passed", "verify_failed", "verify_error"}:
                 verified_rank_counts[rank] += 1
             result = candidate.verify_result

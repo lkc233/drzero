@@ -310,6 +310,7 @@ def main_task(config):
         
         output_padded = wg.generate_sequences(gen_batch)
         outputs = unpad_dataproto(output_padded, pad_size=pad_size)
+        structured_messages = outputs.non_tensor_batch.get("messages")
 
         for i in range(0, len(outputs), config.actor_rollout_ref.rollout.n):
             cur_batch = outputs.batch[i:i+config.actor_rollout_ref.rollout.n]
@@ -318,6 +319,11 @@ def main_task(config):
             raw_messages = [
                 tokenizer.decode(cur_batch["input_ids"][i]) for i in range(len(cur_batch))
             ]
+            trajectories = (
+                [item["messages"] for item in structured_messages[i : i + len(cur_batch)]]
+                if structured_messages is not None
+                else raw_messages
+            )
             responses = [
                 tokenizer.decode(
                     cur_batch["responses"][i], skip_special_tokens=True,
@@ -336,7 +342,7 @@ def main_task(config):
                         state=state,
                         metadata=metadata,
                         hop_count=int(cur_hops[candidate_index]),
-                        trajectory=raw_messages[candidate_index],
+                        trajectory=trajectories[candidate_index],
                         response=responses[candidate_index],
                         question=raw_qs[candidate_index].strip(),
                         reference_answer=raw_ans[candidate_index].strip(),
@@ -396,11 +402,15 @@ def main_task(config):
             if not verify_enabled:
                 for group_index, group in enumerate(candidate_groups):
                     if candidate_group_is_complete(group, verify_enabled=False):
-                        selected.append(max(group, key=lambda item: (item.rank_score, -item.generation_index)))
-                        selected_rows.append(source_rows[group_index])
+                        eligible = [candidate for candidate in group if candidate.format_score > 0]
+                        if eligible:
+                            selected.append(max(eligible, key=lambda item: (item.rank_score, -item.generation_index)))
+                            selected_rows.append(source_rows[group_index])
                         continue
                     reset_candidate_group(group)
                     for candidate in group:
+                        if candidate.format_score <= 0:
+                            continue
                         try:
                             scores, raw_output = await evaluate_rubrics(candidate, state.rubrics, meta_client)
                             candidate.rubric_evaluation = scores
@@ -416,8 +426,10 @@ def main_task(config):
                             }
                             append_candidate_progress(candidate_progress_path, group)
                             raise
-                    selected.append(max(group, key=lambda item: (item.rank_score, -item.generation_index)))
-                    selected_rows.append(source_rows[group_index])
+                    eligible = [candidate for candidate in group if candidate.format_score > 0]
+                    if eligible:
+                        selected.append(max(eligible, key=lambda item: (item.rank_score, -item.generation_index)))
+                        selected_rows.append(source_rows[group_index])
                     append_candidate_progress(candidate_progress_path, group)
                 return selected_rows, selected, {
                     "meta": meta_client.metrics.model_dump(mode="json"),

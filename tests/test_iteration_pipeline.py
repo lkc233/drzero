@@ -32,6 +32,7 @@ from verl.iteration.core import (
 from verl.iteration.dataset import should_use_proposer_iteration_prompt
 from verl.iteration.generation import (
     append_candidate_progress,
+    build_candidate,
     build_candidate_snapshot_contract,
     candidate_group_is_complete,
     compact_candidate_progress,
@@ -137,6 +138,89 @@ def test_evidence_extraction_is_complete_and_strict():
     broken = trajectory().replace("<tool_response>", "<broken>").replace("</tool_response>", "</broken>")
     with pytest.raises(ValueError, match="mismatch"):
         extract_evidence_bundle("Seed evidence", broken, hop_count=2)
+
+
+def test_evidence_extraction_accepts_structured_rollout_messages():
+    structured_trajectory = [
+        {
+            "role": "assistant",
+            "content": "<think>search</think>",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "search",
+                        "arguments": {"query_list": ["bridge entity"]},
+                    }
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": '{"result":"Bridge evidence supports Final"}',
+        },
+        {
+            "role": "assistant",
+            "content": "<question>Which final entity?</question><answer>Final</answer>",
+        },
+    ]
+
+    normalized, evidence = extract_evidence_bundle(
+        "Seed evidence",
+        structured_trajectory,
+        hop_count=2,
+    )
+
+    assert normalized == structured_trajectory
+    assert evidence[1].query == "bridge entity"
+    assert evidence[1].content == "Bridge evidence supports Final"
+
+
+def test_malformed_generated_tool_call_marks_candidate_format_invalid(tmp_path):
+    state = StateStore(tmp_path / "state.json").initialize(
+        iteration=1,
+        proposer="proposer",
+        solver_before="solver",
+        config_snapshot={},
+    )
+
+    candidate = build_candidate(
+        state=state,
+        metadata={"doc_id": "doc-0", "source_document": "Seed evidence"},
+        hop_count=1,
+        trajectory=(
+            "<|im_start|>assistant\n"
+            "<tool_call></tool_call>"
+            "<question>Question?</question><answer>Answer</answer>"
+            "<|im_end|>"
+        ),
+        response="<question>Question?</question><answer>Answer</answer>",
+        question="Question?",
+        reference_answer="Answer",
+        format_score=1.0,
+        generation_index=0,
+    )
+
+    assert candidate.format_score == 0
+    assert candidate.status == "format_invalid"
+    assert candidate.format_failure["error_type"] == "JSONDecodeError"
+    assert [item.kind for item in candidate.evidence_bundle] == ["seed_document"]
+
+    class ShouldNotCall:
+        def __getattr__(self, name):
+            raise AssertionError(f"format-invalid candidate reached {name}")
+
+    winner, ordered, raw_outputs = asyncio.run(
+        rank_and_verify_candidates(
+            [candidate],
+            state.rubrics,
+            ShouldNotCall(),
+            ShouldNotCall(),
+        )
+    )
+    assert winner is None
+    assert ordered == [candidate]
+    assert raw_outputs == {}
+    assert candidate_group_is_complete([candidate], verify_enabled=True)
 
 
 def test_rubric_scoring_and_reward_components():

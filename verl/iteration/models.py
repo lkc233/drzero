@@ -575,6 +575,9 @@ async def rank_and_verify_candidates(
 ) -> tuple[Candidate | None, list[Candidate], dict[str, str]]:
     raw_rubric_outputs: dict[str, str] = {}
     for candidate in candidates:
+        if candidate.format_score <= 0:
+            candidate.status = "format_invalid"
+            continue
         started = time.monotonic()
         try:
             rubric_evaluations, raw_output = await evaluate_rubrics(candidate, rubrics, judge_client)
@@ -596,6 +599,8 @@ async def rank_and_verify_candidates(
     ordered = sorted(candidates, key=lambda item: (-item.rank_score, item.generation_index))
     selected: Candidate | None = None
     for index, candidate in enumerate(ordered):
+        if candidate.format_score <= 0:
+            continue
         started = time.monotonic()
         try:
             result = await verifier.verify(candidate)
@@ -613,7 +618,8 @@ async def rank_and_verify_candidates(
         if result.passed:
             selected = candidate
             for remaining in ordered[index + 1 :]:
-                remaining.status = "not_verified"
+                if remaining.format_score > 0:
+                    remaining.status = "not_verified"
             break
     return selected, ordered, raw_rubric_outputs
 
