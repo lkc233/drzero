@@ -162,6 +162,22 @@ Set `data.resume_candidates=false` as an extra Hydra argument to force regenerat
 `data.candidate_manifest_path` and `data.candidate_progress_path` can override the
 default sidecar paths next to the candidate JSONL.
 
+To repair a candidate snapshot whose persisted trajectories are valid but whose
+derived format/evidence fields are stale, run:
+
+```bash
+python -m verl.iteration.repair_candidates \
+  data/<run>.candidates.jsonl \
+  --backup-path data/<run>.candidates.before_repair.jsonl
+```
+
+The command refuses to overwrite an existing backup or repair a snapshot with a
+non-empty verification progress journal. It streams the snapshot, re-extracts
+evidence, recomputes format scores with the generation scorer, clears downstream
+rubric/verify state, creates a hard-link backup, and atomically replaces the original.
+After repair, rerunning the generation command resumes verification from the repaired
+snapshot instead of repeating proposer generation.
+
 ```bash
 bash iter1_gen_data.sh
 ```

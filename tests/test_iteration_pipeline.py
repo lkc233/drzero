@@ -38,6 +38,7 @@ from verl.iteration.generation import (
     compact_candidate_progress,
     load_candidates_with_progress,
     persist_candidates,
+    repair_candidate_snapshot,
     reset_candidate_group,
     validate_candidate_snapshot_manifest,
     write_candidate_snapshot_manifest,
@@ -171,6 +172,49 @@ def test_evidence_extraction_accepts_structured_rollout_messages():
     )
 
     assert normalized == structured_trajectory
+    assert evidence[1].query == "bridge entity"
+    assert evidence[1].content == "Bridge evidence supports Final"
+
+
+def test_evidence_extraction_ignores_tool_examples_in_proposer_prompt():
+    structured_trajectory = [
+        {
+            "role": "user",
+            "content": build_challenger_prompt(
+                hops=2,
+                document="Seed evidence",
+                skills=initial_skills(),
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "<think>search</think>",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "search",
+                        "arguments": {"query_list": ["bridge entity"]},
+                    }
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": '{"result":"Bridge evidence supports Final"}',
+        },
+        {
+            "role": "assistant",
+            "content": "<question>Which final entity?</question><answer>Final</answer>",
+        },
+    ]
+
+    _, evidence = extract_evidence_bundle(
+        "Seed evidence",
+        structured_trajectory,
+        hop_count=2,
+    )
+
+    assert [item.kind for item in evidence] == ["seed_document", "search_result"]
     assert evidence[1].query == "bridge entity"
     assert evidence[1].content == "Bridge evidence supports Final"
 
@@ -605,6 +649,67 @@ def test_candidate_progress_journal_restores_and_compacts_without_rewriting_snap
     assert not progress_path.exists()
     compacted = load_candidates_with_progress(snapshot_path, progress_path)
     assert [candidate.status for candidate in compacted] == [candidate.status for candidate in restored]
+
+
+def test_candidate_snapshot_repair_recovers_prompt_example_failures_and_keeps_backup(tmp_path):
+    candidate = make_candidate(0, doc_id="doc-0")
+    candidate.question = "Is the bridge entity supported?"
+    candidate.reference_answer = "Yes"
+    candidate.proposer_trajectory = [
+        {
+            "role": "user",
+            "content": build_challenger_prompt(
+                hops=2,
+                document="Seed evidence",
+                skills=initial_skills(),
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "<think>search</think>",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "search",
+                        "arguments": {"query_list": ["bridge entity"]},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": '{"result":"Bridge evidence supports Final"}'},
+        {
+            "role": "assistant",
+            "content": "<question>Is the bridge entity supported?</question><answer>Yes</answer>",
+        },
+    ]
+    candidate.format_score = 0
+    candidate.format_failure = {
+        "error_type": "JSONDecodeError",
+        "reason": "Expecting value: line 1 column 1 (char 0)",
+    }
+    candidate.status = "format_invalid"
+    snapshot_path = tmp_path / "candidates.jsonl"
+    backup_path = tmp_path / "candidates.before_repair.jsonl"
+    persist_candidates(snapshot_path, [candidate])
+    original_snapshot = snapshot_path.read_bytes()
+
+    summary = repair_candidate_snapshot(snapshot_path, backup_path=backup_path)
+
+    repaired = load_candidates_with_progress(snapshot_path, tmp_path / "missing-progress.jsonl")
+    assert summary == {
+        "candidate_count": 1,
+        "recovered_count": 1,
+        "invalid_count": 0,
+        "status_counts": {"generated": 1},
+    }
+    assert backup_path.read_bytes() == original_snapshot
+    assert repaired[0].status == "generated"
+    assert repaired[0].format_score == 1
+    assert repaired[0].format_failure is None
+    assert [item.kind for item in repaired[0].evidence_bundle] == [
+        "seed_document",
+        "search_result",
+    ]
 
 
 def test_incomplete_candidate_group_is_reset_before_retry():

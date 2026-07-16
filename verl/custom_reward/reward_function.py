@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import re
-import string
 import time
 from collections import defaultdict
 from copy import deepcopy
@@ -12,6 +11,12 @@ import torch
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
+from verl.custom_reward.format_scoring import (
+    challenger_answer_reward,
+    challenger_format_score,
+    challenger_think_reward,
+    normalize_answer,
+)
 from verl.custom_reward.reward_rollout import MultiTurnRewardRollout
 from verl.iteration.core import (
     Candidate,
@@ -33,7 +38,6 @@ from verl.prompts import (
     DEFAULT_SOLVER_PREFIX,
     QUESTION_PATTERN,
     SOURCE_PATTERN,
-    THINK_PATTERN,
     TOOL_CALL_PATTERN,
     TOOL_RESPONSE_PATTERN,
 )
@@ -44,23 +48,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 SOLVER_PROMPT_MAX_LENGTH = 512
-
-
-def normalize_answer(s):
-    def remove_articles(text):
-        return re.sub(r"\b(a|an|the)\b", " ", text)
-
-    def white_space_fix(text):
-        return " ".join(text.split())
-
-    def remove_punc(text):
-        exclude = set(string.punctuation)
-        return "".join(ch for ch in text if ch not in exclude)
-
-    def lower(text):
-        return text.lower()
-
-    return white_space_fix(remove_articles(remove_punc(lower(s))))
 
 
 def em_check(prediction, golden_answers):
@@ -107,15 +94,8 @@ def compute_difficulty_score(binary_list):
 
 
 def compute_challenger_format_scores(raw_messages, responses, hops, return_qa=False):
-    think_rewards = []
     assistant_turns = [re.findall(ASSISTANT_PATTERN, m, re.DOTALL) for m in raw_messages]
-    for messages in assistant_turns:
-        reward = 0.0
-        for message in messages:
-            if re.match(THINK_PATTERN, message.strip(), re.DOTALL):
-                reward += 1.0
-
-        think_rewards.append(reward / max(1, len(messages)))
+    think_rewards = [challenger_think_reward(messages) for messages in assistant_turns]
     
     raw_docs, tool_rewards = [], []
     for messages, response, hop in zip(raw_messages, responses, hops, strict=True):
@@ -139,32 +119,24 @@ def compute_challenger_format_scores(raw_messages, responses, hops, return_qa=Fa
         ans_matches = re.findall(ANSWER_PATTERN, text, re.DOTALL)
         ans = ans_matches[-1].strip() if ans_matches else ""
         raw_ans.append(ans)
-        
-        reward = 0.0
-        norm_ans = normalize_answer(ans)
-        if norm_ans in ["yes", "no"] or norm_ans in normalize_answer(doc):
-            if len(norm_ans) > 0 and len(norm_ans.split()) <= 5:
-                reward = 1.0
-            elif len(norm_ans) > 0 and len(norm_ans.split()) <= 10:
-                reward = 0.5
-
-        ans_rewards.append(reward)
+        ans_rewards.append(challenger_answer_reward(doc, ans))
     
     raw_qs = []
     for text in responses:
         q_matches = re.findall(QUESTION_PATTERN, text, re.DOTALL)
         raw_qs.append(q_matches[-1].strip() if q_matches else "")
 
-    integrity_rewards = [
-        len(q) > 0 and len(a) > 0 and normalize_answer(a) not in normalize_answer(q)
-        for q, a in zip(raw_qs, raw_ans, strict=True)
-    ]
     final_scores = [
-        sum([1, think_reward, tool_reward, answer_reward]) / 4
-        if integrity_reward and tool_reward == 1.0
-        else 0
-        for integrity_reward, think_reward, tool_reward, answer_reward in zip(
-            integrity_rewards,
+        challenger_format_score(
+            question=question,
+            answer=answer,
+            think_reward=think_reward,
+            tool_reward=tool_reward,
+            answer_reward=answer_reward,
+        )
+        for question, answer, think_reward, tool_reward, answer_reward in zip(
+            raw_qs,
+            raw_ans,
             think_rewards,
             tool_rewards,
             ans_rewards,

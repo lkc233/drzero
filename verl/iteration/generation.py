@@ -10,6 +10,11 @@ from typing import Any
 
 import pandas as pd
 
+from verl.custom_reward.format_scoring import (
+    challenger_answer_reward,
+    challenger_format_score,
+    challenger_think_reward,
+)
 from verl.iteration.core import (
     Candidate,
     EvidenceItem,
@@ -319,6 +324,126 @@ def atomic_write_parquet(frame: pd.DataFrame, path: str | Path) -> None:
     except Exception:
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def _recovered_format_score(candidate: Candidate, evidence: list[EvidenceItem]) -> float:
+    assistant_messages = [
+        str(message.get("content") or "")
+        for message in candidate.proposer_trajectory
+        if message.get("role") == "assistant"
+    ]
+    if assistant_messages and ("<question>" in assistant_messages[-1] or "<answer>" in assistant_messages[-1]):
+        assistant_messages = assistant_messages[:-1]
+    think_reward = challenger_think_reward(assistant_messages)
+
+    # A successfully extracted evidence bundle proves the tool-call component:
+    # hop 1 receives the base tool reward, while later hops have exactly n - 1
+    # paired search calls and responses.
+    evidence_text = "\n\n".join(item.content for item in evidence)
+    return challenger_format_score(
+        question=candidate.question,
+        answer=candidate.reference_answer,
+        think_reward=think_reward,
+        tool_reward=1.0,
+        answer_reward=challenger_answer_reward(evidence_text, candidate.reference_answer),
+    )
+
+
+def _reset_candidate_after_snapshot_repair(candidate: Candidate) -> None:
+    candidate.rubric_evaluation = []
+    candidate.rubric_raw_output = ""
+    candidate.rubric_failure = None
+    candidate.rank_score = 0
+    candidate.verify_result = None
+    candidate.verify_failure = None
+
+
+def repair_candidate_snapshot(
+    candidates_path: str | Path,
+    *,
+    backup_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Rebuild derived candidate fields from a persisted generation trajectory."""
+    snapshot_path = Path(candidates_path)
+    backup = (
+        Path(backup_path)
+        if backup_path is not None
+        else snapshot_path.with_suffix(snapshot_path.suffix + ".before_repair")
+    )
+    if backup.exists():
+        raise FileExistsError(f"candidate snapshot backup already exists: {backup}")
+
+    status_counts: Counter[str] = Counter()
+    candidate_count = 0
+    recovered_count = 0
+    temporary_path: Path | None = None
+    try:
+        with (
+            snapshot_path.open(encoding="utf-8") as source,
+            tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=snapshot_path.parent,
+                prefix=f".{snapshot_path.name}.",
+                suffix=".repair.tmp",
+                delete=False,
+            ) as destination,
+        ):
+            temporary_path = Path(destination.name)
+            for line_index, line in enumerate(source, start=1):
+                if not line.strip():
+                    continue
+                candidate = Candidate.model_validate_json(line)
+                candidate_count += 1
+                try:
+                    trajectory, evidence = extract_evidence_bundle(
+                        candidate.source_document,
+                        candidate.proposer_trajectory,
+                        hop_count=candidate.hop_count,
+                    )
+                    candidate.proposer_trajectory = trajectory
+                    candidate.evidence_bundle = evidence
+                    candidate.format_score = _recovered_format_score(candidate, evidence)
+                    candidate.format_failure = None
+                    if candidate.format_score > 0:
+                        candidate.status = "generated"
+                        recovered_count += 1
+                    else:
+                        candidate.status = "format_invalid"
+                        candidate.format_failure = {
+                            "error_type": "FormatScoreError",
+                            "reason": "recovered proposer format score is zero",
+                        }
+                except ValueError as error:
+                    candidate.format_score = 0
+                    candidate.status = "format_invalid"
+                    candidate.format_failure = {
+                        "error_type": type(error).__name__,
+                        "reason": str(error),
+                    }
+                _reset_candidate_after_snapshot_repair(candidate)
+                status_counts[candidate.status] += 1
+                destination.write(
+                    json.dumps(candidate.model_dump(mode="json"), ensure_ascii=False, sort_keys=True) + "\n"
+                )
+            destination.flush()
+            os.fsync(destination.fileno())
+
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        os.link(snapshot_path, backup)
+        os.replace(temporary_path, snapshot_path)
+        temporary_path = None
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+
+    return {
+        "candidate_count": candidate_count,
+        "recovered_count": recovered_count,
+        "invalid_count": candidate_count - recovered_count,
+        "status_counts": dict(status_counts),
+    }
 
 
 def _solver_row(source_row: pd.Series, candidate: Candidate) -> dict[str, Any]:

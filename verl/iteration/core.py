@@ -398,16 +398,23 @@ def extract_evidence_bundle(
     for index, message in enumerate(normalized_trajectory):
         raw_content = message.get("content")
         content = str(raw_content or "")
-        tool_calls = message.get("tool_calls")
-        if tool_calls:
-            for tool_call in tool_calls:
-                calls.append((index, _parse_tool_call(tool_call)))
-        for raw_call in re.findall(r"<tool_call>(.*?)</tool_call>", content, re.DOTALL):
-            calls.append((index, _parse_tool_call(raw_call)))
-        if message.get("role") == "tool":
+        role = message.get("role")
+        if role in {"assistant", "raw"}:
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                for tool_call in tool_calls:
+                    calls.append((index, _parse_tool_call(tool_call)))
+            for raw_call in re.findall(r"<tool_call>(.*?)</tool_call>", content, re.DOTALL):
+                calls.append((index, _parse_tool_call(raw_call)))
+        if role == "tool":
             responses.append((index, raw_content))
-        else:
+        elif role == "raw":
             for raw_response in re.findall(r"<tool_response>(.*?)</tool_response>", content, re.DOTALL):
+                responses.append((index, raw_response))
+        elif role == "user" and len(responses) < len(calls):
+            for raw_response in re.findall(r"<tool_response>(.*?)</tool_response>", content, re.DOTALL):
+                if len(responses) == len(calls):
+                    break
                 responses.append((index, raw_response))
 
     expected_searches = max(0, hop_count - 1)
