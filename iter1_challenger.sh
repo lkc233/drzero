@@ -128,5 +128,6 @@ python -m verl.trainer.main_ppo \
     trainer.save_freq=50 \
     trainer.test_freq=-1 \
     trainer.val_before_train=False \
+    trainer.resume_mode=disable \
     trainer.total_epochs=1 \
     trainer.total_training_steps=50 $@ > "$LOG_FILE" 2>&1

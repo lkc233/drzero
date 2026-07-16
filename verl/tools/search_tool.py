@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import threading
+import time
 from contextlib import ExitStack
 from enum import Enum
 from typing import Any, Callable, Optional, TypeVar
@@ -243,14 +244,18 @@ class SearchTool(BaseTool):
 
         if not query_list_from_params or not isinstance(query_list_from_params, list):
             error_msg = "Error: 'query_list' is missing, empty, or not a list in parameters."
-            logger.error(f"[SearchTool] {error_msg} Received parameters: {parameters}")
+            # This is a policy-format violation, not an infrastructure failure.
+            logger.warning(f"[SearchTool] {error_msg} Received parameters: {parameters}")
             return json.dumps({"result": error_msg}), 0.0, {}
 
-        # Execute search using Ray execution pool
+        # Caller-observed latency includes rate-limit queueing and the HTTP call.
+        started = time.monotonic()
         try:
             result_text, metadata = await self.execution_pool.execute.remote(
                 self.execute_search, instance_id, query_list_from_params, self.retrieval_service_url, self.topk, timeout
             )
+            if metadata.get("status") == "api_error":
+                raise RuntimeError(metadata.get("api_request_error") or "retrieval service request failed")
 
             # Store results in instance dictionary
             self._instance_dict[instance_id]["reward"].append(result_text.strip())
@@ -261,6 +266,7 @@ class SearchTool(BaseTool):
                 "status": metadata.get("status", "unknown"),
                 "total_results": metadata.get("total_results", 0),
                 "api_request_error": metadata.get("api_request_error"),
+                "latency_seconds": time.monotonic() - started,
             }
 
             return result_text, 0.0, metrics
@@ -268,7 +274,10 @@ class SearchTool(BaseTool):
         except Exception as e:
             error_result = json.dumps({"result": f"Search execution failed: {e}"})
             logger.error(f"[SearchTool] Execution failed: {e}")
-            return error_result, 0.0, {"error": str(e)}
+            return error_result, 0.0, {
+                "error": str(e),
+                "latency_seconds": time.monotonic() - started,
+            }
 
     async def calc_reward(self, instance_id: str, **kwargs) -> str:
         return self._instance_dict[instance_id]["reward"]

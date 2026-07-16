@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import string
+import time
 from collections import defaultdict
 from copy import deepcopy
 
@@ -122,9 +123,9 @@ def compute_challenger_format_scores(raw_messages, responses, hops, return_qa=Fa
         doc = re.findall(SOURCE_PATTERN, messages, re.DOTALL)[0]
         doc_matches = re.findall(TOOL_RESPONSE_PATTERN, messages, re.DOTALL)
         
-        reward = 1.0 if hop == 1 else 0.0
-        if tool_calls == len(doc_matches) and tool_calls > 0:
-            reward = min((1 + tool_calls) / hop, 1.0)
+        expected_tool_calls = max(0, int(hop) - 1)
+        reward = float(tool_calls == len(doc_matches) == expected_tool_calls)
+        if reward and tool_calls > 0:
             try:
                 doc += "\n\n" + "\n\n".join([json.loads(x)["result"] for x in doc_matches])
             except (json.JSONDecodeError, KeyError, TypeError):
@@ -159,7 +160,9 @@ def compute_challenger_format_scores(raw_messages, responses, hops, return_qa=Fa
         for q, a in zip(raw_qs, raw_ans, strict=True)
     ]
     final_scores = [
-        sum([1, think_reward, tool_reward, answer_reward]) / 4 if integrity_reward else 0
+        sum([1, think_reward, tool_reward, answer_reward]) / 4
+        if integrity_reward and tool_reward == 1.0
+        else 0
         for integrity_reward, think_reward, tool_reward, answer_reward in zip(
             integrity_rewards,
             think_rewards,
@@ -183,6 +186,8 @@ def compute_challenger_format_scores(raw_messages, responses, hops, return_qa=Fa
 
 
 def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, extra_infos, **kwargs):
+    reward_started = time.monotonic()
+    timings = {}
     batch = kwargs["data"]
     processing_class = kwargs["processing_class"]
     assert "qwen" in type(processing_class).__name__.lower()
@@ -200,10 +205,13 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
         ) for i in range(len(batch))
     ]
 
+    format_started = time.monotonic()
     format_scores, raw_qs, raw_ans = compute_challenger_format_scores(
         raw_messages, responses, hops, return_qa=True,
     )
+    timings["format"] = time.monotonic() - format_started
 
+    solver_prepare_started = time.monotonic()
     gen_batch_ids, gen_batch = [], defaultdict(list)
     for idx, (s, q, a) in enumerate(zip(format_scores, raw_qs, raw_ans, strict=True)):
         if s > 0:
@@ -253,6 +261,7 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
                 gen_batch[key].append(value)
 
     group_size = kwargs["reward_rollout_n"]
+    timings["solver_prepare"] = time.monotonic() - solver_prepare_started
     loop = get_or_create_event_loop()
     solver_scores = []
     grouped_preds = []
@@ -272,11 +281,14 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
                 processing_class=processing_class,
                 model_name=kwargs["model_name"],
                 base_url=kwargs["base_url"],
+                request_concurrency=int(kwargs.get("solver_max_concurrency", 64)),
             ) as reward_rollout:
                 gen_batch_output = await reward_rollout.generate_sequences(gen_batch)
                 return gen_batch_output
 
+        solver_started = time.monotonic()
         outputs = loop.run_until_complete(_compute_with_rollout())
+        timings["solver_rollout"] = time.monotonic() - solver_started
         extracted_preds = []
         last_turn_responses = [
             x["messages"][-1].content for x in outputs.non_tensor_batch["messages"]
@@ -309,6 +321,7 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
     rubric_evaluation_failures = [False for _ in format_scores]
 
     if rubric_weight:
+        rubric_prepare_started = time.monotonic()
         iteration_state_path = kwargs.get("iteration_state_path")
         meta_model_config = kwargs.get("meta_model")
         if not iteration_state_path or not meta_model_config:
@@ -328,7 +341,9 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
             if not source_matches:
                 raise ValueError("proposer reward input is missing the source document")
             source_document = source_matches[0].strip()
-            trajectory_text = message
+            # The prompt contains illustrative tool markup; only the generated
+            # response is an executed proposer trajectory.
+            trajectory_text = response
             try:
                 trajectory, evidence = extract_evidence_bundle(
                     source_document,
@@ -370,12 +385,16 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
                     meta_client,
                 )
 
+        timings["rubric_prepare"] = time.monotonic() - rubric_prepare_started
+        rubric_started = time.monotonic()
         (
             rubric_evaluations,
             rubric_score_overrides,
             rubric_evaluation_failures,
         ) = loop.run_until_complete(_compute_rubric_evaluations())
+        timings["rubric_evaluation"] = time.monotonic() - rubric_started
 
+    scoring_started = time.monotonic()
     final_scores = [
         proposer_reward_components(
             float(format_score),
@@ -396,6 +415,8 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
     ]
     for score, failed in zip(final_scores, rubric_evaluation_failures, strict=True):
         score["rubric_evaluation_failed"] = float(failed)
+    timings["scoring"] = time.monotonic() - scoring_started
+    timings["total"] = time.monotonic() - reward_started
 
     example_idx = gen_batch_ids[0] if gen_batch_ids else 0
     example_solver_responses = grouped_preds[0] if grouped_preds else []
@@ -405,6 +426,7 @@ def compute_challenger_score_batch(data_sources, solution_strs, ground_truths, e
         f"🚀 Rubric rewards: Avg {np.mean([item['rubric_score'] for item in final_scores])}, "
         f"Max {np.max([item['rubric_score'] for item in final_scores])}\n"
         f"🚨 Rubric evaluation failures: {sum(rubric_evaluation_failures)}\n"
+        f"⏱️ Reward timings (seconds): {json.dumps({key: round(value, 3) for key, value in timings.items()}, sort_keys=True)}\n"
         f"🚀 Final rewards: Avg {np.mean([item['score'] for item in final_scores])}, "
         f"Max {np.max([item['score'] for item in final_scores])}\n"
         f"🧑‍🏫 Challenger question: {raw_qs[example_idx]}\n"

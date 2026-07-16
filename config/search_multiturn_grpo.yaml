@@ -126,3 +126,4 @@ custom_reward_function:
     iteration_state_path: ${iteration.state_path}
     proposer_reward: ${proposer_reward}
     meta_model: ${meta_model}
+    solver_max_concurrency: 64

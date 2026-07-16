@@ -16,7 +16,7 @@ tools:
           properties:
             query_list:
               type: array
-              item:
+              items:
                 type: string
               description: A list of fully-formed semantic queries. The tool will return search results for each query.
           required: 

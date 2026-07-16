@@ -78,6 +78,17 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+async def gather_with_concurrency(items, limit: int, func):
+    """Run async request work without opening one connection per batch item."""
+    semaphore = asyncio.Semaphore(max(1, int(limit)))
+
+    async def run(item):
+        async with semaphore:
+            return await func(item)
+
+    return await tqdm_asyncio.gather(*(run(item) for item in items), desc="Rollout questions with the solver model")
+
+
 # NOTE(sgm): add for verl. We can optimize it by making
 #  the dataloader yield List[int] without padding.
 def _pre_process_inputs(
@@ -120,6 +131,7 @@ class MultiTurnRewardRollout(BaseRollout):
         processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
         model_name: str = "Qwen/Qwen2.5-3B-Instruct",
         base_url: str = "http://127.0.0.1:8001",
+        request_concurrency: int = 64,
         **kwargs,
     ):
         super().__init__()
@@ -150,9 +162,14 @@ class MultiTurnRewardRollout(BaseRollout):
 
         self.model_name = model_name
         self.base_url = base_url.strip("/") + "/v1/completions"
+        self.request_concurrency = max(1, int(request_concurrency))
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=120.0, read=1200.0, write=120.0, pool=120.0),
-            limits=httpx.Limits(max_keepalive_connections=2048, max_connections=8192)
+            limits=httpx.Limits(
+                max_keepalive_connections=self.request_concurrency,
+                max_connections=self.request_concurrency,
+            ),
+            trust_env=False,
         )
         # self.client = AsyncOpenAI(
         #     base_url=base_url,
@@ -238,9 +255,10 @@ class MultiTurnRewardRollout(BaseRollout):
         req_list = self._preprocess_prompt_to_async_rollout_requests(
             prompts,
         )
-        output_req_list = await tqdm_asyncio.gather(
-            *[self._async_rollout_a_request(req, do_sample, is_validate, **kwargs) for req in req_list],
-            desc="Rollout questions with the solver model",
+        output_req_list = await gather_with_concurrency(
+            req_list,
+            self.request_concurrency,
+            lambda req: self._async_rollout_a_request(req, do_sample, is_validate, **kwargs),
         )
         sorted_output_req_list = sorted(output_req_list, key=lambda x: (x.batch_data_id, x.rollout_offset))
 
@@ -250,6 +268,7 @@ class MultiTurnRewardRollout(BaseRollout):
         prompt_position_ids, response_position_ids = [], []
         prompt_loss_mask, response_loss_mask = [], []
         messages = []
+        rollout_metrics = []
         reward_scores = []
         multi_modal_inputs = []
         request_ids = []
@@ -290,6 +309,7 @@ class MultiTurnRewardRollout(BaseRollout):
             prompt_loss_mask.append(req.prompt_loss_mask.to(tgt_device).squeeze(0))
             response_loss_mask.append(req.response_loss_mask.to(tgt_device).squeeze(0))
             messages.append({"messages": req.messages})
+            rollout_metrics.append(req.metrics)
             reward_scores.append(req.reward_scores)
             multi_modal_inputs.append(req.multi_modal_inputs)
             request_ids.append(req.request_id)
@@ -379,6 +399,7 @@ class MultiTurnRewardRollout(BaseRollout):
             "messages": np.array(messages),
             "reward_scores": np.array(reward_scores),
             "request_id": np.array(request_ids),
+            "rollout_metrics": np.array(rollout_metrics, dtype=object),
         }
 
         is_multimodal = isinstance(self.processing_class, ProcessorMixin) and (
@@ -401,6 +422,9 @@ class MultiTurnRewardRollout(BaseRollout):
         **kwargs,
     ) -> AsyncRolloutRequest:
         _req = deepcopy(req)
+        request_started = time.monotonic()
+        model_seconds = 0.0
+        retriever_seconds = 0.0
         finish_reason_type = None
         output = None
 
@@ -447,6 +471,7 @@ class MultiTurnRewardRollout(BaseRollout):
             elif _req.state == AsyncRolloutRequestStateEnum.TOOL_CALLING:
                 if _req.messages[-1].tool_calls is not None:
                     parsed_tool_calls = _req.messages[-1].tool_calls
+                    tool_started = time.monotonic()
                     tool_call_results = await asyncio.gather(
                         *[
                             self._tool_map[tool_call.function.name].execute(
@@ -457,6 +482,7 @@ class MultiTurnRewardRollout(BaseRollout):
                             for tool_call in parsed_tool_calls
                         ]
                     )
+                    retriever_seconds += time.monotonic() - tool_started
                     _req.add_tool_response_messages(self.processing_class, [resp for resp, _, _ in tool_call_results])
                     for tool_call, (resp, reward, metrics) in zip(parsed_tool_calls, tool_call_results, strict=True):
                         _req.update_metrics(metrics, tool_call.function.name)
@@ -490,7 +516,9 @@ class MultiTurnRewardRollout(BaseRollout):
                         "video support is not implemented yet, current length of video data is %d", len(video_data)
                     )
 
+                model_started = time.monotonic()
                 output = await self._handle_engine_call(_req, request_sampling_params, image_data=image_data)
+                model_seconds += time.monotonic() - model_started
                 content = output["text"]
                 finish_reason_type = FinishReasonTypeEnum.from_str(output["finish_reason"])
                 current_turns += 1
@@ -597,6 +625,13 @@ class MultiTurnRewardRollout(BaseRollout):
         tool_reward_scores = dict(tool_reward_scores)
         all_rewards = {**tool_reward_scores, **{"user_turn_rewards": user_turn_rewards}}
         _req.finalize(self.processing_class, all_rewards, finish_reason_type)
+        total_seconds = time.monotonic() - request_started
+        _req.metrics["rollout_timing"] = {
+            "model_seconds": model_seconds,
+            "retriever_seconds": retriever_seconds,
+            "overhead_seconds": max(0.0, total_seconds - model_seconds - retriever_seconds),
+            "total_seconds": total_seconds,
+        }
 
         return _req
 

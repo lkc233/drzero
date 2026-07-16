@@ -146,6 +146,7 @@ RUBRIC_EVALUATION_PROMPT = """Evaluate one generated multi-hop problem against e
 Use the seed document and the complete proposer trajectory. Return JSON only with this shape:
 {{"evaluations":[{{"rubric_id":"...","score":1,"reason":"..."}}]}}.
 Scores must be integers from 1 through 5 and every rubric id must appear exactly once.
+Keep every reason under 40 words. Do not include analysis outside the JSON object.
 
 Rubrics:
 {rubrics}

@@ -24,6 +24,7 @@ class OpenAIFunctionPropertySchema(BaseModel):
     type: str
     description: str | None = None
     enum: list[str] | None = None
+    items: dict[str, Any] | None = None
 
 
 class OpenAIFunctionParametersSchema(BaseModel):

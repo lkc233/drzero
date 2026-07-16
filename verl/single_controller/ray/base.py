@@ -257,6 +257,31 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         return self.cls.options(**options).remote(*self.args, **remote_kwargs)
 
 
+def wrap_worker_cls_with_env(worker_cls):
+    """Make a standalone Worker actor consume RayWorkerGroup's injected env.
+
+    Ray does not forward actor constructor kwargs to Python ``__new__``. Install
+    the injected environment in ``__init__`` before ``Worker.__init__`` reads it.
+    """
+
+    class EnvInitializedWorker(worker_cls):
+        def __init__(self, *args, _verl_worker_env=None, **kwargs):
+            if _verl_worker_env:
+                os.environ.update(_verl_worker_env)
+                # Ray does not forward constructor kwargs to Python __new__, so
+                # Worker.__new__ cannot discover rank/WG_PREFIX for standalone
+                # actors. Perform that pre-init contract here, exactly once.
+                self._configure_before_init(
+                    f"{os.environ['WG_PREFIX']}_register_center",
+                    int(os.environ["RANK"]),
+                )
+            super().__init__(*args, **kwargs)
+
+    EnvInitializedWorker.__name__ = f"EnvInitialized{worker_cls.__name__}"
+    EnvInitializedWorker.__qualname__ = EnvInitializedWorker.__name__
+    return EnvInitializedWorker
+
+
 class RayWorkerGroup(WorkerGroup):
     """A group of Ray workers that can be managed collectively.
 
@@ -782,14 +807,15 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
 
     # TODO: create a class with customizable name
     class WorkerDict(worker_cls):
-        def __new__(cls, _verl_worker_env=None):
+        def __init__(self, _verl_worker_env=None):
             if _verl_worker_env:
                 os.environ.update(_verl_worker_env)
-            return super().__new__(cls)
-
-        def __init__(self, _verl_worker_env=None):
-            # __new__ installs the actor-specific environment before Worker.__new__
-            # performs its one required register-center initialization.
+                # Actor kwargs are not visible to Worker.__new__, so perform its
+                # register-center contract after installing the worker env.
+                self._configure_before_init(
+                    f"{os.environ['WG_PREFIX']}_register_center",
+                    int(os.environ["RANK"]),
+                )
             super().__init__()
             self.worker_dict = {}
             for key, user_defined_cls in cls_dict.items():

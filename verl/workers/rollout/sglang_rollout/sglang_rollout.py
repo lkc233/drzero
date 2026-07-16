@@ -797,6 +797,9 @@ class SGLangRollout(BaseRollout):
     ) -> AsyncRolloutRequest:
         assert self._tp_rank == 0, "only the master process can call this function"
         _req = deepcopy(req)
+        request_started = time.monotonic()
+        model_seconds = 0.0
+        retriever_seconds = 0.0
         finish_reason_type = None
         output = None
 
@@ -843,6 +846,7 @@ class SGLangRollout(BaseRollout):
             elif _req.state == AsyncRolloutRequestStateEnum.TOOL_CALLING:
                 if _req.messages[-1].tool_calls is not None:
                     parsed_tool_calls = _req.messages[-1].tool_calls
+                    tool_started = time.monotonic()
                     tool_call_results = await asyncio.gather(
                         *[
                             self._tool_map[tool_call.function.name].execute(
@@ -853,6 +857,7 @@ class SGLangRollout(BaseRollout):
                             for tool_call in parsed_tool_calls
                         ]
                     )
+                    retriever_seconds += time.monotonic() - tool_started
                     _req.add_tool_response_messages(self.processing_class, [resp for resp, _, _ in tool_call_results])
                     for tool_call, (resp, reward, metrics) in zip(parsed_tool_calls, tool_call_results, strict=True):
                         _req.update_metrics(metrics, tool_call.function.name)
@@ -886,7 +891,9 @@ class SGLangRollout(BaseRollout):
                         "video support is not implemented yet, current length of video data is %d", len(video_data)
                     )
 
+                model_started = time.monotonic()
                 output = await self._handle_engine_call(_req, request_sampling_params, image_data=image_data)
+                model_seconds += time.monotonic() - model_started
                 content = output["text"]
                 finish_reason_type = FinishReasonTypeEnum.from_str(output["meta_info"]["finish_reason"]["type"])
                 current_turns += 1
@@ -993,6 +1000,13 @@ class SGLangRollout(BaseRollout):
         tool_reward_scores = dict(tool_reward_scores)
         all_rewards = {**tool_reward_scores, **{"user_turn_rewards": user_turn_rewards}}
         _req.finalize(self.processing_class, all_rewards, finish_reason_type)
+        total_seconds = time.monotonic() - request_started
+        _req.metrics["rollout_timing"] = {
+            "model_seconds": model_seconds,
+            "retriever_seconds": retriever_seconds,
+            "overhead_seconds": max(0.0, total_seconds - model_seconds - retriever_seconds),
+            "total_seconds": total_seconds,
+        }
 
         return _req
 
@@ -1089,6 +1103,7 @@ class SGLangRollout(BaseRollout):
         prompt_position_ids, response_position_ids = [], []
         prompt_loss_mask, response_loss_mask = [], []
         messages = []
+        rollout_metrics = []
         reward_scores = []
         multi_modal_inputs = []
         request_ids = []
@@ -1129,6 +1144,7 @@ class SGLangRollout(BaseRollout):
             prompt_loss_mask.append(req.prompt_loss_mask.to(tgt_device).squeeze(0))
             response_loss_mask.append(req.response_loss_mask.to(tgt_device).squeeze(0))
             messages.append({"messages": req.messages})
+            rollout_metrics.append(req.metrics)
             reward_scores.append(req.reward_scores)
             multi_modal_inputs.append(req.multi_modal_inputs)
             request_ids.append(req.request_id)
@@ -1223,6 +1239,7 @@ class SGLangRollout(BaseRollout):
             "messages": np.array(messages),
             "reward_scores": np.array(reward_scores),
             "request_id": np.array(request_ids),
+            "rollout_metrics": np.array(rollout_metrics, dtype=object),
         }
 
         is_multimodal = isinstance(self.processing_class, ProcessorMixin) and (

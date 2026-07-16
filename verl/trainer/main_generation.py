@@ -67,6 +67,7 @@ from verl.iteration.models import (
 from verl.prompts import DEFAULT_SOLVER_PREFIX, build_challenger_prompt
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+from verl.single_controller.ray.base import wrap_worker_cls_with_env
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.hdfs_io import makedirs
@@ -154,6 +155,7 @@ def main(config):
 
 
 def run_generation(config) -> None:
+    started_ray = False
     if not ray.is_initialized():
         # this is for local ray cluster
         temp_dir = os.environ.get("DRZERO_RAY_TMPDIR", "/tmp/drzero-ray")
@@ -162,8 +164,13 @@ def run_generation(config) -> None:
             _temp_dir=temp_dir,
             _node_ip_address=os.environ.get("DRZERO_RAY_NODE_IP", "127.0.0.2"),
         )
+        started_ray = True
 
-    ray.get(main_task.remote(config))
+    try:
+        ray.get(main_task.remote(config))
+    finally:
+        if started_ray:
+            ray.shutdown()
 
 
 @ray.remote(num_cpus=1)
@@ -309,7 +316,7 @@ def main_task(config):
             process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes
         )
         ray_cls_with_init = RayClassWithInitArgs(
-            cls=ray.remote(ActorRolloutRefWorker),
+            cls=ray.remote(wrap_worker_cls_with_env(ActorRolloutRefWorker)),
             config=config.actor_rollout_ref,
             role="rollout"
         )
@@ -414,8 +421,9 @@ def main_task(config):
             source_index = batch_idx * config_batch_size + document_offset
             if state:
                 metadata = metadata_rows[source_index]
-                group = [
-                    build_candidate(
+                group = []
+                for candidate_index in range(rollout_count):
+                    candidate = build_candidate(
                         state=state,
                         metadata=metadata,
                         hop_count=int(cur_hops[candidate_index]),
@@ -426,8 +434,7 @@ def main_task(config):
                         format_score=float(format_scores[candidate_index]),
                         generation_index=candidate_index,
                     )
-                    for candidate_index in range(rollout_count)
-                ]
+                    group.append(candidate)
                 candidate_groups.append(group)
                 source_rows.append(dataset.iloc[source_index])
             else:

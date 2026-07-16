@@ -58,6 +58,7 @@ class EndpointConfig(StrictModel):
     timeout_seconds: float = Field(default=120, gt=0)
     max_retries: int = Field(default=3, ge=1)
     max_concurrency: int = Field(default=32, ge=1)
+    disable_thinking: bool = True
 
 
 class ClientMetrics(StrictModel):
@@ -219,7 +220,7 @@ class OpenAICompatibleClient:
         self.config = config
         self.metrics = ClientMetrics()
         self._semaphore = asyncio.Semaphore(config.max_concurrency)
-        self._client = httpx.AsyncClient(timeout=config.timeout_seconds)
+        self._client = httpx.AsyncClient(timeout=config.timeout_seconds, trust_env=False)
 
     async def __aenter__(self) -> OpenAICompatibleClient:
         return self
@@ -261,6 +262,8 @@ class OpenAICompatibleClient:
             payload["tool_choice"] = "auto"
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if self.config.disable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         started = time.monotonic()
         last_error: Exception | None = None

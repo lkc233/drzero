@@ -64,6 +64,42 @@ from verl.utils.tracking import ValidationGenerationsLogger
 WorkerType = type[Worker]
 
 
+def compute_rollout_timing_metrics(gen_batch_output: DataProto) -> dict[str, float]:
+    """Aggregate per-trajectory model/retriever timings from multi-turn rollout."""
+    raw_metrics = gen_batch_output.non_tensor_batch.get("rollout_metrics")
+    if raw_metrics is None:
+        return {}
+    timings = [item.get("rollout_timing", {}) for item in raw_metrics]
+    timings = [item for item in timings if item]
+    if not timings:
+        return {}
+
+    result: dict[str, float] = {}
+    total_sum = sum(float(item["total_seconds"]) for item in timings)
+    for label in ("model", "retriever", "overhead", "total"):
+        values = np.asarray([float(item[f"{label}_seconds"]) for item in timings])
+        result[f"generation/trajectory_{label}_seconds_mean"] = float(values.mean())
+        result[f"generation/trajectory_{label}_seconds_p50"] = float(np.percentile(values, 50))
+        result[f"generation/trajectory_{label}_seconds_p95"] = float(np.percentile(values, 95))
+        if label != "total":
+            result[f"generation/{label}_latency_share"] = float(values.sum() / max(total_sum, 1e-9))
+
+    search_calls = [
+        call
+        for item in raw_metrics
+        for call in item.get("search", [])
+        if isinstance(call, dict) and "latency_seconds" in call
+    ]
+    search_latencies = np.asarray([float(call["latency_seconds"]) for call in search_calls])
+    result["generation/retriever_request_count"] = float(len(search_calls))
+    if len(search_latencies):
+        result["generation/retriever_request_seconds_mean"] = float(search_latencies.mean())
+        result["generation/retriever_request_seconds_p50"] = float(np.percentile(search_latencies, 50))
+        result["generation/retriever_request_seconds_p95"] = float(np.percentile(search_latencies, 95))
+        result["generation/retriever_request_seconds_p99"] = float(np.percentile(search_latencies, 99))
+    return result
+
+
 class Role(Enum):
     """
     To create more roles dynamically, you can subclass Role and add new members
@@ -1209,6 +1245,7 @@ class RayPPOTrainer:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+                        metrics.update(compute_rollout_timing_metrics(gen_batch_output))
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):

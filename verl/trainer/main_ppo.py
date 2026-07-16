@@ -54,6 +54,7 @@ def run_ppo(config) -> None:
     # proxy-independent even when this entrypoint is invoked outside our shell
     # scripts.  Model downloads still retain their configured proxy behavior.
     # Check if Ray is not initialized
+    started_ray = False
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
         # Set environment variables in the runtime environment to control tokenizer parallelism,
@@ -72,6 +73,7 @@ def run_ppo(config) -> None:
             # endpoints correctly formatted.
             _node_ip_address=os.environ.get("DRZERO_RAY_NODE_IP", "127.0.0.2"),
         )
+        started_ray = True
 
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
@@ -84,13 +86,16 @@ def run_ppo(config) -> None:
         runner = TaskRunner.options(runtime_env={"nsight": nsight_options}).remote()
     else:
         runner = TaskRunner.remote()
-    ray.get(runner.run.remote(config))
+    try:
+        ray.get(runner.run.remote(config))
 
-    # [Optional] get the path of the timeline trace file from the configuration, default to None
-    # This file is used for performance analysis
-    timeline_json_file = config.ray_init.get("timeline_json_file", None)
-    if timeline_json_file:
-        ray.timeline(filename=timeline_json_file)
+        # [Optional] get the path of the timeline trace file from the configuration, default to None
+        timeline_json_file = config.ray_init.get("timeline_json_file", None)
+        if timeline_json_file:
+            ray.timeline(filename=timeline_json_file)
+    finally:
+        if started_ray:
+            ray.shutdown()
 
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
