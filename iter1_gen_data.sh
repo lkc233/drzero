@@ -32,6 +32,10 @@ if [ $# -ge 1 ]; then
     shift
 fi
 
+LOG_DIR="$(pwd)/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/iter1_gen_data_ratio${hop_ratio}_$(date +%Y%m%d_%H%M%S).log"
+
 algorithm=grpo_batch
 grpo_group_size=1
 reward_group_size=5
@@ -96,6 +100,8 @@ CUDA_VISIBLE_DEVICES=7 python -m sglang.launch_server \
 
 sleep 30
 
+echo "Logging to: $LOG_FILE"
+
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python -m verl.trainer.main_generation \
     --config-path="$CONFIG_PATH" \
     --config-name='search_multiturn_grpo' \
@@ -123,4 +129,4 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python -m verl.trainer.main_generation \
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_memory_utilization} \
     actor_rollout_ref.rollout.multi_turn.tool_config_path="$TOOL_CONFIG" \
     trainer.nnodes=1 \
-    trainer.n_gpus_per_node=${gpus} $@
+    trainer.n_gpus_per_node=${gpus} $@ > "$LOG_FILE" 2>&1
