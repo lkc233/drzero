@@ -3,6 +3,7 @@
 
 set -euo pipefail
 set -x
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" judge
 
 # --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
 export CC=/usr/bin/gcc
@@ -63,7 +64,6 @@ VAL_DATA="./data/test.parquet"
 # Rubric reward uses the standalone local Qwen3.6 service configured by meta_model.
 STATE="./iterations/iter_1/state.json"
 export DRZERO_ITERATION_STATE="$STATE"
-bash "$(dirname "${BASH_SOURCE[0]}")/setup_qwen36_judge.sh" --check
 if [ ! -f "$STATE" ]; then
     python -m verl.iteration.cli init-state \
         --state "$STATE" --iteration 1 --proposer "$model" --solver "$model"
@@ -82,8 +82,6 @@ cleanup() { kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/nu
 trap cleanup EXIT INT TERM
 bash "$(dirname "${BASH_SOURCE[0]}")/scripts/wait_for_model_server.sh" \
     "http://127.0.0.1:8001/v1/models" "$model" "$SERVER_PID"
-bash "$(dirname "${BASH_SOURCE[0]}")/scripts/wait_for_model_server.sh" \
-    "http://127.0.0.1:8000/v1/models" "Qwen/Qwen3.6-35B-A3B" 0
 
 echo "Logging to: $LOG_FILE"
 

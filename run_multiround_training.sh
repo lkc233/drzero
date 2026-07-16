@@ -3,11 +3,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/scripts/load_deployment_config.sh"
 
 hop_ratio="${HOP_RATIO:-4321}"
 rounds="${ROUNDS:-3}"
-export TRAIN_GPU_DEVICES="${TRAIN_GPU_DEVICES:-2,3,4,5,6,7}"
-export GENERATION_GPU_DEVICES="${GENERATION_GPU_DEVICES:-2,3,4,5,6,7}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 # Ray's local dashboard/runtime-env agents communicate over loopback and the
 # node address.  Bypass the cluster HTTP proxy for those local control-plane
@@ -16,8 +16,7 @@ local_hosts="127.0.0.1,localhost,::1,$(hostname),$(hostname -i | tr ' ' ',')"
 export NO_PROXY="${local_hosts},${NO_PROXY:-}"
 export no_proxy="$NO_PROXY"
 
-curl --fail --silent http://127.0.0.1:8000/v1/models >/dev/null
-curl --fail --silent http://127.0.0.1:8020/docs >/dev/null
+scripts/check_deployment_services.sh all
 
 for iteration in $(seq 1 "$rounds"); do
     echo "[$(date -Is)] Starting iteration $iteration/$rounds"

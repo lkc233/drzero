@@ -6,6 +6,7 @@ hop_ratio="${2:-4321}"
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root"
 source .venv/bin/activate
+source scripts/load_deployment_config.sh
 
 model_name="${MODEL_NAME:-qwen3-4b-instruct-2507}"
 solver_name="solver_iter${iteration}_hf"
@@ -56,7 +57,7 @@ server_pid=$!
 cleanup() { kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 scripts/wait_for_model_server.sh "http://127.0.0.1:8001/v1/models" "$solver_name" "$server_pid"
-setup_qwen36_judge.sh --check
+scripts/check_deployment_services.sh all
 
 python -m verl.iteration.cli keepout-eval \
     --state "$state" --config config/search_multiturn_grpo.yaml \

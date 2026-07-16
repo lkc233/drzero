@@ -92,7 +92,7 @@ dynamic_state:
 meta_model:
   model_name: ${oc.env:DRZERO_META_MODEL,Qwen/Qwen3.6-35B-A3B}
   base_url: ${oc.env:DRZERO_META_BASE_URL,"http://127.0.0.1:8000"}
-  api_key_env: null
+  api_key_env: ${oc.env:DRZERO_META_API_KEY_ENV,null}
   timeout_seconds: 120
   max_retries: 3
   max_concurrency: 32
@@ -102,7 +102,7 @@ meta_model:
 updater_model:
   model_name: ${oc.env:DRZERO_UPDATER_MODEL,Qwen/Qwen3.6-35B-A3B}
   base_url: ${oc.env:DRZERO_UPDATER_BASE_URL,"http://127.0.0.1:8000"}
-  api_key_env: null
+  api_key_env: ${oc.env:DRZERO_UPDATER_API_KEY_ENV,null}
   timeout_seconds: 120
   max_retries: 3
   max_concurrency: 32

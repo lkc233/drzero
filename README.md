@@ -105,7 +105,39 @@ Start all three persistent services/jobs with the checked-in tmux launcher:
 bash start_training_tmux.sh
 ```
 
-It creates (or preserves) the `retriever`, `qwen36`, and `training` sessions.
+### Local and remote service topologies
+
+The training code uses the same Retriever and OpenAI-compatible judge contracts
+whether those services run locally or on another server. Copy one deployment
+profile and edit only the machine-local copy:
+
+```bash
+# All services run on this host.
+cp deploy/local-all.env.example deploy/current.env
+
+# Or: this host trains against externally managed services.
+cp deploy/remote-services.env.example deploy/current.env
+```
+
+`deploy/current.env` is ignored by Git. `MANAGE_RETRIEVER` and `MANAGE_JUDGE`
+control service ownership; `DRZERO_RETRIEVER_URL`, `DRZERO_META_BASE_URL`, and
+`DRZERO_UPDATER_BASE_URL` control where the algorithm sends requests. A remote
+profile therefore skips local service tmux sessions but still validates each
+service contract before training.
+
+To select a profile outside the repository:
+
+```bash
+DRZERO_DEPLOY_CONFIG=/etc/drzero/server.env bash start_training_tmux.sh
+```
+
+The same deployment profile is loaded when an individual iteration script is
+run directly. API-key settings contain the *name* of a secret environment
+variable (`DRZERO_META_API_KEY_ENV` / `DRZERO_UPDATER_API_KEY_ENV`), never the
+secret itself.
+
+It creates (or preserves) the locally managed service sessions and the
+`training` session.
 
 **1. Train Proposer:**
 Train the proposer agent to generate challenging yet manageable questions for the base solver.

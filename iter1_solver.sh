@@ -1,7 +1,9 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
+set -euo pipefail
 set -x
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" retriever
 
 # --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
 export CC=/usr/bin/gcc
@@ -12,12 +14,12 @@ export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
 source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
-export LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LIBRARY_PATH}"
-export LD_LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LD_LIBRARY_PATH}"
+export LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:${LD_LIBRARY_PATH:-}"
 # The venv uses system python3.10 without dev headers; Triton/sglang JIT-compile at
 # runtime and need Python.h. Borrow ABI-compatible 3.10 headers from miniforge.
 if [ ! -f "/usr/include/python3.10/Python.h" ]; then
-    export CPATH="/home/luokc/miniforge3/include/python3.10:${CPATH}"
+    export CPATH="/home/luokc/miniforge3/include/python3.10:${CPATH:-}"
 fi
 
 # The local retriever is expected at 127.0.0.1:8020 by default.

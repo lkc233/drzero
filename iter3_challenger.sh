@@ -3,6 +3,7 @@
 
 set -euo pipefail
 set -x
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" judge
 
 export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-2,3,4,5,6,7}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
@@ -69,8 +70,6 @@ cleanup() { kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/nu
 trap cleanup EXIT INT TERM
 bash "$(dirname "${BASH_SOURCE[0]}")/scripts/wait_for_model_server.sh" \
     "http://127.0.0.1:8001/v1/models" "$SOLVER_NAME" "$SERVER_PID"
-bash "$(dirname "${BASH_SOURCE[0]}")/scripts/wait_for_model_server.sh" \
-    "http://127.0.0.1:8000/v1/models" "Qwen/Qwen3.6-35B-A3B" 0
 
 python -m verl.trainer.main_ppo \
     --config-path=$CONFIG_PATH \

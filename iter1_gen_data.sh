@@ -2,6 +2,7 @@
 # All rights reserved.
 
 set -x
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" all
 
 # --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
 export CC=/usr/bin/gcc
@@ -46,7 +47,6 @@ model_name=$(basename "$model" | tr '[:upper:]' '[:lower:]')
 # during generation and for verify (round-start solver + judge).
 STATE="./iterations/iter_1/state.json"
 export DRZERO_ITERATION_STATE="$STATE"
-bash "$(dirname "${BASH_SOURCE[0]}")/setup_qwen36_judge.sh" --check
 
 challenger_step=50
 data_partition=1

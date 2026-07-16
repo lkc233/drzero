@@ -1,7 +1,9 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
+set -euo pipefail
 set -x
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" retriever
 
 export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-2,3,4,5,6,7}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
