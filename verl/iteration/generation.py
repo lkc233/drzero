@@ -14,6 +14,8 @@ from verl.iteration.core import (
     Candidate,
     IterationState,
     atomic_write_json,
+    canonical_hash,
+    dynamic_state_hash,
     extract_evidence_bundle,
     stable_group_split,
 )
@@ -103,6 +105,170 @@ def atomic_write_jsonl(path: str | Path, records: list[dict[str, Any]]) -> None:
 
 def persist_candidates(path: str | Path, candidates: list[Candidate]) -> None:
     atomic_write_jsonl(path, [candidate.model_dump(mode="json") for candidate in candidates])
+
+
+def build_candidate_snapshot_contract(
+    *,
+    state: IterationState,
+    metadata_rows: list[dict[str, Any]],
+    candidate_count: int,
+    model_path: str | Path,
+    rollout_config: dict[str, Any],
+    verification_config: dict[str, Any],
+    tool_config_path: str | Path,
+) -> dict[str, Any]:
+    metadata_hasher = hashlib.sha256()
+    for metadata in metadata_rows:
+        item = [metadata["doc_id"], metadata["source_document"], int(metadata["hop_count"])]
+        metadata_hasher.update(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        metadata_hasher.update(b"\n")
+
+    local_model_path = Path(model_path)
+    if local_model_path.is_dir():
+        model_files = [
+            {
+                "path": str(path.relative_to(local_model_path)),
+                "size": path.stat().st_size,
+                "mtime_ns": path.stat().st_mtime_ns,
+            }
+            for path in sorted(local_model_path.rglob("*"))
+            if path.is_file()
+        ]
+    else:
+        model_files = []
+    tool_path = Path(tool_config_path)
+    return {
+        "schema_version": 1,
+        "state_hash": dynamic_state_hash(state),
+        "metadata_hash": metadata_hasher.hexdigest(),
+        "document_count": len(metadata_rows),
+        "candidate_count_per_document": candidate_count,
+        "model_path": str(local_model_path.resolve()) if local_model_path.exists() else str(model_path),
+        "model_files": model_files,
+        "rollout_config": rollout_config,
+        "verification_config": verification_config,
+        "tool_config_hash": hashlib.sha256(tool_path.read_bytes()).hexdigest(),
+    }
+
+
+def write_candidate_snapshot_manifest(path: str | Path, contract: dict[str, Any]) -> None:
+    atomic_write_json(
+        path,
+        {
+            "schema_version": 1,
+            "fingerprint": canonical_hash(contract),
+            "contract": contract,
+        },
+    )
+
+
+def validate_candidate_snapshot_manifest(path: str | Path, contract: dict[str, Any]) -> None:
+    manifest_path = Path(path)
+    if not manifest_path.exists():
+        raise ValueError(
+            "candidate snapshot has no generation manifest; set data.resume_candidates=false to regenerate it"
+        )
+    with manifest_path.open(encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    if manifest.get("schema_version") != 1 or manifest.get("fingerprint") != canonical_hash(contract):
+        raise ValueError(
+            "candidate snapshot was produced by a different generation run; "
+            "set data.resume_candidates=false to regenerate it"
+        )
+
+
+def reset_candidate_progress(path: str | Path) -> None:
+    Path(path).unlink(missing_ok=True)
+
+
+def append_candidate_progress(path: str | Path, candidates: list[Candidate]) -> None:
+    """Append one fully processed candidate group to the verify journal."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema_version": 1,
+        "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+    }
+    with destination.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def load_candidates_with_progress(
+    candidates_path: str | Path,
+    progress_path: str | Path,
+) -> list[Candidate]:
+    """Restore the candidate snapshot and apply durable per-group updates."""
+    snapshot_path = Path(candidates_path)
+    candidates = []
+    with snapshot_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                candidates.append(Candidate.model_validate_json(line))
+    index_by_id = {candidate.candidate_id: index for index, candidate in enumerate(candidates)}
+    if len(index_by_id) != len(candidates):
+        raise ValueError(f"candidate snapshot contains duplicate ids: {snapshot_path}")
+
+    journal_path = Path(progress_path)
+    if not journal_path.exists():
+        return candidates
+    with journal_path.open(encoding="utf-8") as handle:
+        line_index = 0
+        while line := handle.readline():
+            line_index += 1
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                if not handle.read():
+                    break
+                raise
+            if record.get("schema_version") != 1 or not isinstance(record.get("candidates"), list):
+                raise ValueError(f"invalid candidate progress record at line {line_index}: {journal_path}")
+            updates = [Candidate.model_validate(item) for item in record["candidates"]]
+            update_ids = [candidate.candidate_id for candidate in updates]
+            if len(update_ids) != len(set(update_ids)):
+                raise ValueError(f"candidate progress record contains duplicate ids at line {line_index}")
+            unknown_ids = sorted(set(update_ids) - index_by_id.keys())
+            if unknown_ids:
+                raise ValueError(f"candidate progress references unknown ids: {unknown_ids}")
+            for candidate in updates:
+                candidates[index_by_id[candidate.candidate_id]] = candidate
+    return candidates
+
+
+def compact_candidate_progress(
+    candidates_path: str | Path,
+    progress_path: str | Path,
+    candidates: list[Candidate],
+) -> None:
+    persist_candidates(candidates_path, candidates)
+    reset_candidate_progress(progress_path)
+
+
+def candidate_group_is_complete(candidates: list[Candidate], *, verify_enabled: bool) -> bool:
+    if not candidates:
+        return False
+    if not verify_enabled:
+        return all(candidate.status == "not_verified" for candidate in candidates)
+    passed = [candidate for candidate in candidates if candidate.status == "verify_passed"]
+    if len(passed) == 1:
+        allowed = {"verify_passed", "verify_failed", "not_verified"}
+        return all(candidate.status in allowed for candidate in candidates)
+    return not passed and all(candidate.status == "verify_failed" for candidate in candidates)
+
+
+def reset_candidate_group(candidates: list[Candidate]) -> None:
+    for candidate in candidates:
+        candidate.rubric_evaluation = []
+        candidate.rubric_raw_output = ""
+        candidate.rubric_failure = None
+        candidate.rank_score = 0
+        candidate.status = "generated"
+        candidate.verify_result = None
+        candidate.verify_failure = None
 
 
 def atomic_write_parquet(frame: pd.DataFrame, path: str | Path) -> None:

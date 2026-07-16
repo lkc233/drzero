@@ -37,9 +37,18 @@ from verl import DataProto
 from verl.custom_reward.reward_function import compute_challenger_format_scores
 from verl.iteration.core import StateStore, atomic_write_json, candidate_rank_score
 from verl.iteration.generation import (
+    append_candidate_progress,
     build_candidate,
+    build_candidate_snapshot_contract,
     build_generation_summary,
+    candidate_group_is_complete,
+    compact_candidate_progress,
+    load_candidates_with_progress,
     persist_candidates,
+    reset_candidate_group,
+    reset_candidate_progress,
+    validate_candidate_snapshot_manifest,
+    write_candidate_snapshot_manifest,
     write_generation_datasets,
 )
 from verl.iteration.models import (
@@ -152,28 +161,8 @@ def main_task(config):
         ]
         all_hops = [int(x.split("_")[-1]) for x in dataset.data_source]
 
-    resource_pool = RayResourcePool(
-        process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes
-    )
-    ray_cls_with_init = RayClassWithInitArgs(
-        cls=ray.remote(ActorRolloutRefWorker),
-        config=config.actor_rollout_ref,
-        role="rollout"
-    )
-
-    wg = RayWorkerGroup(
-        resource_pool=resource_pool,
-        ray_cls_with_init=ray_cls_with_init,
-        device_name=config.trainer.device,
-    )
-    wg.init_model()
-    wg.load_checkpoint(
-        os.path.join(config.ckpt_path, "actor"), del_local_after_load=False,
-    )
-
     total_samples = len(dataset)
     config_batch_size = config.data.batch_size
-    num_batch = -(-total_samples // config_batch_size)
 
     candidate_count = int(iteration_config.get("candidate_count_per_document", 5))
     rollout_count = int(config.actor_rollout_ref.rollout.n)
@@ -182,8 +171,86 @@ def main_task(config):
             f"generation must produce exactly {candidate_count} candidates per document, got rollout.n={rollout_count}"
         )
 
+    output_path = Path(config.data.output_path)
+    candidates_path = config.data.get("candidates_path") or str(output_path.with_suffix(".candidates.jsonl"))
+    candidate_progress_path = config.data.get("candidate_progress_path") or str(
+        Path(candidates_path).with_name(Path(candidates_path).stem + "_progress.jsonl")
+    )
+    candidate_manifest_path = config.data.get("candidate_manifest_path") or str(
+        Path(candidates_path).with_name(Path(candidates_path).stem + "_manifest.json")
+    )
+    snapshot_contract = build_candidate_snapshot_contract(
+        state=state,
+        metadata_rows=metadata_rows,
+        candidate_count=candidate_count,
+        model_path=config.actor_rollout_ref.model.path,
+        rollout_config=OmegaConf.to_container(config.actor_rollout_ref.rollout, resolve=True),
+        verification_config={
+            "enabled": verify_enabled,
+            "solver_samples": int(verify_config.get("solver_samples", 3)),
+            "solver_model": OmegaConf.to_container(verify_config.get("solver_model"), resolve=True),
+            "judge_model": OmegaConf.to_container(
+                verify_config.get("judge_model") or config.meta_model,
+                resolve=True,
+            ),
+        },
+        tool_config_path=config.actor_rollout_ref.rollout.multi_turn.tool_config_path,
+    ) if state else None
+    resume_candidates = bool(
+        state
+        and config.data.get("resume_candidates", True)
+        and Path(candidates_path).exists()
+    )
+
     candidate_groups = []
     source_rows = []
+    if resume_candidates:
+        validate_candidate_snapshot_manifest(candidate_manifest_path, snapshot_contract)
+        restored_candidates = load_candidates_with_progress(candidates_path, candidate_progress_path)
+        expected_candidate_count = total_samples * candidate_count
+        if len(restored_candidates) != expected_candidate_count:
+            raise ValueError(
+                "candidate snapshot does not match the selected dataset partition: "
+                f"expected {expected_candidate_count}, got {len(restored_candidates)}"
+            )
+        for group_index in range(total_samples):
+            start = group_index * candidate_count
+            group = restored_candidates[start : start + candidate_count]
+            expected_doc_id = str(metadata_rows[group_index]["doc_id"])
+            if {candidate.doc_id for candidate in group} != {expected_doc_id}:
+                raise ValueError(
+                    f"candidate snapshot document mismatch at group {group_index}: expected {expected_doc_id}"
+                )
+            if sorted(candidate.generation_index for candidate in group) != list(range(candidate_count)):
+                raise ValueError(f"candidate snapshot has invalid generation indices at group {group_index}")
+            candidate_groups.append(group)
+            source_rows.append(dataset.iloc[group_index])
+        num_batch = 0
+        print(f"Resuming verify from {candidates_path} with {len(restored_candidates)} candidates")
+    else:
+        resource_pool = RayResourcePool(
+            process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes
+        )
+        ray_cls_with_init = RayClassWithInitArgs(
+            cls=ray.remote(ActorRolloutRefWorker),
+            config=config.actor_rollout_ref,
+            role="rollout"
+        )
+
+        wg = RayWorkerGroup(
+            resource_pool=resource_pool,
+            ray_cls_with_init=ray_cls_with_init,
+            device_name=config.trainer.device,
+        )
+        wg.init_model()
+        ckpt_path = config.get("ckpt_path")
+        if ckpt_path:
+            wg.load_checkpoint(
+                os.path.join(ckpt_path, "actor"),
+                del_local_after_load=False,
+            )
+        num_batch = -(-total_samples // config_batch_size)
+
     legacy_questions, legacy_answers, legacy_contexts = [], [], []
     for batch_idx in trange(num_batch):
         gen_batch = defaultdict(list)
@@ -304,14 +371,20 @@ def main_task(config):
         dataset.to_parquet(config.data.output_path)
         return
 
-    output_path = Path(config.data.output_path)
-    candidates_path = config.data.get("candidates_path") or str(output_path.with_suffix(".candidates.jsonl"))
     keepout_path = config.data.get("keepout_path") or str(output_path.with_name(output_path.stem + "_keepout.parquet"))
     split_manifest_path = config.data.get("split_manifest_path") or str(
         output_path.with_name(output_path.stem + "_split_manifest.json")
     )
     all_candidates = [candidate for group in candidate_groups for candidate in group]
-    persist_candidates(candidates_path, all_candidates)
+    completed_groups_reused = (
+        sum(candidate_group_is_complete(group, verify_enabled=verify_enabled) for group in candidate_groups)
+        if resume_candidates
+        else 0
+    )
+    if not resume_candidates:
+        persist_candidates(candidates_path, all_candidates)
+        write_candidate_snapshot_manifest(candidate_manifest_path, snapshot_contract)
+        reset_candidate_progress(candidate_progress_path)
 
     async def _rank_and_verify_all():
         meta_config = EndpointConfig.model_validate(
@@ -322,6 +395,11 @@ def main_task(config):
         async with OpenAICompatibleClient(meta_config) as meta_client:
             if not verify_enabled:
                 for group_index, group in enumerate(candidate_groups):
+                    if candidate_group_is_complete(group, verify_enabled=False):
+                        selected.append(max(group, key=lambda item: (item.rank_score, -item.generation_index)))
+                        selected_rows.append(source_rows[group_index])
+                        continue
+                    reset_candidate_group(group)
                     for candidate in group:
                         try:
                             scores, raw_output = await evaluate_rubrics(candidate, state.rubrics, meta_client)
@@ -336,11 +414,11 @@ def main_task(config):
                                 "reason": str(error),
                                 "details": getattr(error, "details", {}),
                             }
+                            append_candidate_progress(candidate_progress_path, group)
                             raise
-                        finally:
-                            persist_candidates(candidates_path, all_candidates)
                     selected.append(max(group, key=lambda item: (item.rank_score, -item.generation_index)))
                     selected_rows.append(source_rows[group_index])
+                    append_candidate_progress(candidate_progress_path, group)
                 return selected_rows, selected, {
                     "meta": meta_client.metrics.model_dump(mode="json"),
                     "solver": {},
@@ -362,6 +440,16 @@ def main_task(config):
                     samples=int(config.verify.solver_samples),
                 )
                 for group_index, group in enumerate(candidate_groups):
+                    if candidate_group_is_complete(group, verify_enabled=True):
+                        winner = next(
+                            (candidate for candidate in group if candidate.status == "verify_passed"),
+                            None,
+                        )
+                        if winner is not None:
+                            selected.append(winner)
+                            selected_rows.append(source_rows[group_index])
+                        continue
+                    reset_candidate_group(group)
                     try:
                         winner, _, _ = await rank_and_verify_candidates(
                             group,
@@ -370,7 +458,7 @@ def main_task(config):
                             verifier,
                         )
                     finally:
-                        persist_candidates(candidates_path, all_candidates)
+                        append_candidate_progress(candidate_progress_path, group)
                     if winner is not None:
                         selected.append(winner)
                         selected_rows.append(source_rows[group_index])
@@ -382,6 +470,12 @@ def main_task(config):
         return selected_rows, selected, metrics
 
     selected_source_rows, selected_candidates, model_call_metrics = asyncio.run(_rank_and_verify_all())
+    model_call_metrics["resume"] = {
+        "resumed_snapshot": resume_candidates,
+        "completed_groups_reused": completed_groups_reused,
+        "call_metrics_scope": "current_process_only",
+    }
+    compact_candidate_progress(candidates_path, candidate_progress_path, all_candidates)
     split_manifest = write_generation_datasets(
         selected_source_rows,
         selected_candidates,

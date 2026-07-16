@@ -23,6 +23,9 @@ data:
   use_proposer_iteration_prompt: false
   proposer_iteration_state_path: ${iteration.state_path}
   candidates_path: null
+  candidate_manifest_path: null
+  candidate_progress_path: null
+  resume_candidates: true
   keepout_path: null
   split_manifest_path: null
   generation_summary_path: null

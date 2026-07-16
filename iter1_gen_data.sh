@@ -49,6 +49,17 @@ data_partition=1
 EXP_DIR="checkpoints/dr-zero"
 MODEL_PATH="challenger_iter1_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}"
 CKPT_PATH="${EXP_DIR}/${MODEL_PATH}/global_step_${challenger_step}"
+MERGED_MODEL_PATH="${CKPT_PATH}/merged_hf"
+MERGE_COMPLETE="${MERGED_MODEL_PATH}/.merge_complete"
+SOURCE_FINGERPRINT="$(
+    find "${CKPT_PATH}/actor" -maxdepth 1 -type f \
+        \( -name 'model_world_size_*.pt' -o -name 'fsdp_config.json' \) \
+        -printf '%f:%s:%T@\n' |
+        sort |
+        sha256sum |
+        cut -d' ' -f1
+)"
+CACHED_FINGERPRINT="$(sed -n '1p' "$MERGE_COMPLETE" 2>/dev/null)"
 
 # Hydra resolves a relative --config-path against verl/trainer/, so use an absolute path.
 CONFIG_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config"
@@ -56,6 +67,21 @@ TOOL_CONFIG="$CONFIG_PATH/search_tool_config.yaml"
 
 TRAIN_DATA="./data/zero_ratio${hop_ratio}.parquet"
 TRAIN_DATA_OUT="./data/zero_${MODEL_PATH}.parquet"
+
+# Generation uses seven workers while the proposer checkpoint was saved with eight
+# FSDP shards. Merge once to a world-size-independent HF checkpoint so the rollout
+# workers initialize from the trained proposer without attempting an incompatible
+# 8-way -> 7-way sharded checkpoint load.
+if [ "$CACHED_FINGERPRINT" != "$SOURCE_FINGERPRINT" ]; then
+    if ! python -m verl.model_merger merge \
+        --backend fsdp \
+        --local_dir "${CKPT_PATH}/actor" \
+        --target_dir "$MERGED_MODEL_PATH"; then
+        echo "Failed to merge proposer checkpoint: $CKPT_PATH" >&2
+        exit 1
+    fi
+    printf '%s\n' "$SOURCE_FINGERPRINT" > "$MERGE_COMPLETE"
+fi
 
 
 # Serve the untrained Qwen3-4B on :8001 for verify (solver answer samples + judge),
@@ -73,7 +99,7 @@ sleep 30
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python -m verl.trainer.main_generation \
     --config-path="$CONFIG_PATH" \
     --config-name='search_multiturn_grpo' \
-    +ckpt_path=$CKPT_PATH \
+    +ckpt_path=null \
     data.prompt_key=prompt \
     +data.path=$TRAIN_DATA \
     +data.partition=$data_partition \
@@ -85,7 +111,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python -m verl.trainer.main_generation \
     meta_model.base_url="http://127.0.0.1:8001" \
     meta_model.model_name=${model} \
     meta_model.api_key_env=null \
-    actor_rollout_ref.model.path=$model \
+    actor_rollout_ref.model.path=$MERGED_MODEL_PATH \
     actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.n=${sample_size} \
     actor_rollout_ref.rollout.temperature=1.0 \

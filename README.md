@@ -71,6 +71,19 @@ bash iter1_challenger.sh
 **2. Synthesize Data:**
 Generate training data using the learnt proposer model. Parameters such as model path and sample size can be specified in the script.
 
+For iteration 1, the script first merges the 8-way FSDP proposer checkpoint into
+`global_step_50/merged_hf`, then initializes the seven generation workers from that
+world-size-independent model. The merge is cached using `.merge_complete`, which
+records a source-shard fingerprint so a replaced checkpoint is merged again.
+
+Candidate verification uses an append-only progress journal instead of rewriting the
+entire candidate snapshot after every document. A rerun resumes completed verification
+groups only when the saved generation manifest still matches the iteration state,
+selected source documents, merged model files, rollout configuration, and tool config.
+Set `data.resume_candidates=false` as an extra Hydra argument to force regeneration.
+`data.candidate_manifest_path` and `data.candidate_progress_path` can override the
+default sidecar paths next to the candidate JSONL.
+
 ```bash
 bash iter1_gen_data.sh
 ```

@@ -30,7 +30,18 @@ from verl.iteration.core import (
     validate_skills,
 )
 from verl.iteration.dataset import should_use_proposer_iteration_prompt
-from verl.iteration.generation import write_generation_datasets
+from verl.iteration.generation import (
+    append_candidate_progress,
+    build_candidate_snapshot_contract,
+    candidate_group_is_complete,
+    compact_candidate_progress,
+    load_candidates_with_progress,
+    persist_candidates,
+    reset_candidate_group,
+    validate_candidate_snapshot_manifest,
+    write_candidate_snapshot_manifest,
+    write_generation_datasets,
+)
 from verl.iteration.models import (
     AnalysisReport,
     DynamicStateUpdater,
@@ -480,6 +491,103 @@ def test_generation_writes_mutually_exclusive_train_and_keepout_parquets(tmp_pat
     assert len(train) + len(keepout) == len(candidates)
     assert manifest["train_doc_count"] == len(train_doc_ids)
     Candidate.model_validate_json(keepout.iloc[0].metadata["candidate_json"])
+
+
+def test_candidate_progress_journal_restores_and_compacts_without_rewriting_snapshot(tmp_path):
+    candidates = [make_candidate(index, doc_id="doc-0") for index in range(5)]
+    snapshot_path = tmp_path / "candidates.jsonl"
+    progress_path = tmp_path / "candidates_progress.jsonl"
+    persist_candidates(snapshot_path, candidates)
+    original_snapshot = snapshot_path.read_bytes()
+
+    candidates[0].status = "verify_failed"
+    candidates[1].status = "verify_passed"
+    for candidate in candidates[2:]:
+        candidate.status = "not_verified"
+    append_candidate_progress(progress_path, candidates)
+
+    assert snapshot_path.read_bytes() == original_snapshot
+    restored = load_candidates_with_progress(snapshot_path, progress_path)
+    assert candidate_group_is_complete(restored, verify_enabled=True)
+    assert [candidate.status for candidate in restored] == [
+        "verify_failed",
+        "verify_passed",
+        "not_verified",
+        "not_verified",
+        "not_verified",
+    ]
+
+    compact_candidate_progress(snapshot_path, progress_path, restored)
+    assert not progress_path.exists()
+    compacted = load_candidates_with_progress(snapshot_path, progress_path)
+    assert [candidate.status for candidate in compacted] == [candidate.status for candidate in restored]
+
+
+def test_incomplete_candidate_group_is_reset_before_retry():
+    candidates = [make_candidate(index, doc_id="doc-0") for index in range(5)]
+    candidates[0].status = "verify_failed"
+    candidates[1].status = "verify_error"
+    candidates[1].verify_failure = {"reason": "transient"}
+    assert not candidate_group_is_complete(candidates, verify_enabled=True)
+
+    reset_candidate_group(candidates)
+
+    assert all(candidate.status == "generated" for candidate in candidates)
+    assert all(candidate.verify_failure is None for candidate in candidates)
+
+
+def test_candidate_progress_loader_ignores_a_truncated_final_journal_record(tmp_path):
+    candidates = [make_candidate(index, doc_id="doc-0") for index in range(5)]
+    snapshot_path = tmp_path / "candidates.jsonl"
+    progress_path = tmp_path / "candidates_progress.jsonl"
+    persist_candidates(snapshot_path, candidates)
+    candidates[0].status = "verify_failed"
+    append_candidate_progress(progress_path, candidates)
+    with progress_path.open("a", encoding="utf-8") as handle:
+        handle.write('{"schema_version": 1, "candidates":')
+
+    restored = load_candidates_with_progress(snapshot_path, progress_path)
+
+    assert restored[0].status == "verify_failed"
+
+
+def test_candidate_snapshot_manifest_rejects_stale_generation_inputs(tmp_path):
+    state_path = tmp_path / "state.json"
+    state = StateStore(state_path).initialize(
+        iteration=1,
+        proposer="proposer",
+        solver_before="solver",
+        config_snapshot={},
+    )
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    (model_path / "model.safetensors").write_bytes(b"weights")
+    tool_path = tmp_path / "tools.yaml"
+    tool_path.write_text("tools: []\n", encoding="utf-8")
+    metadata = [{"doc_id": "doc-0", "source_document": "source", "hop_count": 2}]
+    contract = build_candidate_snapshot_contract(
+        state=state,
+        metadata_rows=metadata,
+        candidate_count=5,
+        model_path=model_path,
+        rollout_config={"n": 5, "temperature": 1.0},
+        verification_config={"enabled": True, "solver_samples": 3, "judge_model": "judge-a"},
+        tool_config_path=tool_path,
+    )
+    manifest_path = tmp_path / "manifest.json"
+    write_candidate_snapshot_manifest(manifest_path, contract)
+    validate_candidate_snapshot_manifest(manifest_path, contract)
+
+    stale_contract = dict(contract, rollout_config={"n": 5, "temperature": 0.5})
+    with pytest.raises(ValueError, match="different generation run"):
+        validate_candidate_snapshot_manifest(manifest_path, stale_contract)
+
+    stale_verify_contract = dict(
+        contract,
+        verification_config={"enabled": True, "solver_samples": 3, "judge_model": "judge-b"},
+    )
+    with pytest.raises(ValueError, match="different generation run"):
+        validate_candidate_snapshot_manifest(manifest_path, stale_verify_contract)
 
 
 class FakeSolver:
