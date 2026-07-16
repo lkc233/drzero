@@ -30,16 +30,11 @@ os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 import hydra
-import numpy as np
 import pandas as pd
 import ray
-import torch
 from omegaconf import OmegaConf
 from tqdm import trange
 
-import verl.utils.torch_functional as verl_F
-from verl import DataProto
-from verl.custom_reward.reward_function import compute_challenger_format_scores
 from verl.iteration.core import StateStore, atomic_write_json, candidate_rank_score
 from verl.iteration.generation import (
     append_candidate_progress,
@@ -52,6 +47,7 @@ from verl.iteration.generation import (
     persist_candidates,
     reset_candidate_group,
     reset_candidate_progress,
+    resolve_generation_phase,
     validate_candidate_snapshot_manifest,
     write_candidate_snapshot_manifest,
     write_generation_datasets,
@@ -61,7 +57,7 @@ from verl.iteration.models import (
     OpenAICompatibleClient,
     ProblemVerifier,
     evaluate_rubrics,
-    rank_and_verify_candidates,
+    rank_and_verify_candidate_groups,
     validate_model_reference,
 )
 from verl.prompts import DEFAULT_SOLVER_PREFIX, build_challenger_prompt
@@ -155,8 +151,13 @@ def main(config):
 
 
 def run_generation(config) -> None:
-    started_ray = False
-    if not ray.is_initialized():
+    phase = resolve_generation_phase(config.data.get("phase", "all"))
+    if phase == "verify":
+        _main_task(config)
+        return
+
+    owns_ray = not ray.is_initialized()
+    if owns_ray:
         # this is for local ray cluster
         temp_dir = os.environ.get("DRZERO_RAY_TMPDIR", "/tmp/drzero-ray")
         ray.init(
@@ -164,29 +165,23 @@ def run_generation(config) -> None:
             _temp_dir=temp_dir,
             _node_ip_address=os.environ.get("DRZERO_RAY_NODE_IP", "127.0.0.2"),
         )
-        started_ray = True
 
     try:
         ray.get(main_task.remote(config))
     finally:
-        if started_ray:
+        if owns_ray:
             ray.shutdown()
 
 
 @ray.remote(num_cpus=1)
 def main_task(config):
+    return _main_task(config)
+
+
+def _main_task(config):
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
     OmegaConf.resolve(config)
-
-    local_path = copy_to_local(
-        config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
-    )
-    trust_remote_code = config.data.get("trust_remote_code", False)
-
-    tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    phase = resolve_generation_phase(config.data.get("phase", "all"))
 
     dataset = pd.read_parquet(config.data.path)
     if config.data.partition is not None:
@@ -205,6 +200,8 @@ def main_task(config):
     if verify_enabled and not state_path:
         raise ValueError("verify is enabled but iteration.state_path is not configured")
     state = StateStore(state_path).load() if state_path else None
+    if phase != "all" and state is None:
+        raise ValueError("split generate/verify phases require iteration.state_path")
     if state and verify_enabled:
         configured_solver = str(verify_config.get("solver_model", {}).get("model_name"))
         validate_model_reference(
@@ -280,10 +277,18 @@ def main_task(config):
         },
         tool_config_path=config.actor_rollout_ref.rollout.multi_turn.tool_config_path,
     ) if state else None
+    candidate_snapshot_exists = Path(candidates_path).exists()
+    resume_requested = bool(config.data.get("resume_candidates", True))
+    if phase == "generate" and resume_requested and candidate_snapshot_exists:
+        validate_candidate_snapshot_manifest(candidate_manifest_path, snapshot_contract)
+        print(f"Generation snapshot already exists at {candidates_path}; skipping generation")
+        return
+    if phase == "verify" and not candidate_snapshot_exists:
+        raise ValueError(f"verify phase requires an existing candidate snapshot: {candidates_path}")
     resume_candidates = bool(
         state
-        and config.data.get("resume_candidates", True)
-        and Path(candidates_path).exists()
+        and candidate_snapshot_exists
+        and (resume_requested or phase == "verify")
     )
 
     candidate_groups = []
@@ -312,6 +317,30 @@ def main_task(config):
         num_batch = 0
         print(f"Resuming verify from {candidates_path} with {len(restored_candidates)} candidates")
     else:
+        import numpy as np
+        import torch
+
+        import verl.utils.torch_functional as verl_F
+        from verl import DataProto
+        from verl.custom_reward.reward_function import compute_challenger_format_scores
+        from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+        from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+        from verl.utils import hf_tokenizer
+        from verl.utils.fs import copy_to_local
+        from verl.utils.hdfs_io import makedirs
+        from verl.utils.model import compute_position_id_with_mask
+        from verl.workers.fsdp_workers import ActorRolloutRefWorker
+
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get("use_shm", False),
+        )
+        trust_remote_code = config.data.get("trust_remote_code", False)
+        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
         resource_pool = RayResourcePool(
             process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes
         )
@@ -443,7 +472,8 @@ def main_task(config):
                 legacy_answers.append(raw_ans[sample_idx])
                 legacy_contexts.append(raw_messages[sample_idx])
 
-    _release_generation_workers(wg, resource_pool)
+    if not resume_candidates:
+        _release_generation_workers(wg, resource_pool)
 
     if not state:
         for idx, (question, answer, context) in enumerate(
@@ -477,6 +507,9 @@ def main_task(config):
         persist_candidates(candidates_path, all_candidates)
         write_candidate_snapshot_manifest(candidate_manifest_path, snapshot_contract)
         reset_candidate_progress(candidate_progress_path)
+        if phase == "generate":
+            print(f"Generated and persisted {len(all_candidates)} candidates to {candidates_path}")
+            return
 
     async def _rank_and_verify_all():
         meta_config = EndpointConfig.model_validate(
@@ -530,26 +563,45 @@ def main_task(config):
                     solver_client,
                     samples=int(config.verify.solver_samples),
                 )
+                winners_by_group: list = [None] * len(candidate_groups)
+                pending_groups = []
+                pending_group_indices = []
                 for group_index, group in enumerate(candidate_groups):
                     if candidate_group_is_complete(group, verify_enabled=True):
-                        winner = next(
+                        winners_by_group[group_index] = next(
                             (candidate for candidate in group if candidate.status == "verify_passed"),
                             None,
                         )
-                        if winner is not None:
-                            selected.append(winner)
-                            selected_rows.append(source_rows[group_index])
                         continue
                     reset_candidate_group(group)
-                    try:
-                        winner, _, _ = await rank_and_verify_candidates(
+                    pending_groups.append(group)
+                    pending_group_indices.append(group_index)
+
+                progress_lock = asyncio.Lock()
+
+                async def persist_completed_group(group):
+                    async with progress_lock:
+                        await asyncio.to_thread(
+                            append_candidate_progress,
+                            candidate_progress_path,
                             group,
-                            state.rubrics,
-                            meta_client,
-                            verifier,
                         )
-                    finally:
-                        append_candidate_progress(candidate_progress_path, group)
+
+                pending_winners = await rank_and_verify_candidate_groups(
+                    pending_groups,
+                    state.rubrics,
+                    meta_client,
+                    verifier,
+                    max_concurrency=int(config.verify.get("max_group_concurrency", 8)),
+                    on_group_complete=persist_completed_group,
+                )
+                for group_index, winner in zip(
+                    pending_group_indices,
+                    pending_winners,
+                    strict=True,
+                ):
+                    winners_by_group[group_index] = winner
+                for group_index, winner in enumerate(winners_by_group):
                     if winner is not None:
                         selected.append(winner)
                         selected_rows.append(source_rows[group_index])

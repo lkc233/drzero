@@ -28,6 +28,8 @@ _Avoid_: Round, epoch, cycle
 One of the four sequential steps within an iteration: `challenger` (proposer RL training), `gen_data` (question generation + verify + filter), `solver` (solver GRPO training), `update_state` (rubric evaluation + skills/rubrics update).
 _Avoid_: Step (ambiguous with training step), stage
 
+The `gen_data` phase has two process-isolated execution passes: `generate` persists the candidate snapshot and releases all generation workers; `verify` then restores that snapshot and may reuse the full GPU pool for data-parallel verification.
+
 ### Skills and Rubrics
 
 **Skill**:

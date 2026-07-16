@@ -605,6 +605,50 @@ async def rank_and_verify_candidates(
     return selected, ordered, raw_rubric_outputs
 
 
+async def rank_and_verify_candidate_groups(
+    candidate_groups: list[list[Candidate]],
+    rubrics: list[Rubric],
+    judge_client: OpenAICompatibleClient,
+    verifier: ProblemVerifier,
+    *,
+    max_concurrency: int,
+    on_group_complete: Callable[[list[Candidate]], Awaitable[None]] | None = None,
+) -> list[Candidate | None]:
+    """Rank and verify independent document groups concurrently in stable input order."""
+    if max_concurrency < 1:
+        raise ValueError("candidate group concurrency must be positive")
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def process_group(group: list[Candidate]) -> Candidate | None:
+        async with semaphore:
+            try:
+                try:
+                    winner, _, _ = await rank_and_verify_candidates(
+                        group,
+                        rubrics,
+                        judge_client,
+                        verifier,
+                    )
+                    return winner
+                except Exception as error:
+                    logger.warning(
+                        "Candidate group verify failed for %s: %s; details=%s",
+                        [candidate.candidate_id for candidate in group],
+                        error,
+                        json.dumps(
+                            getattr(error, "details", {}),
+                            ensure_ascii=False,
+                            default=str,
+                        ),
+                    )
+                    return None
+            finally:
+                if on_group_complete is not None:
+                    await on_group_complete(group)
+
+    return list(await asyncio.gather(*(process_group(group) for group in candidate_groups)))
+
+
 SEARCH_TOOL_SCHEMA = {
     "type": "function",
     "function": {

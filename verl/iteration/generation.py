@@ -6,7 +6,7 @@ import os
 import tempfile
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -27,6 +27,15 @@ from verl.iteration.core import (
     stable_group_split,
 )
 from verl.prompts import DEFAULT_SOLVER_PREFIX
+
+GenerationPhase = Literal["all", "generate", "verify"]
+
+
+def resolve_generation_phase(value: Any) -> GenerationPhase:
+    phase = str(value or "all")
+    if phase not in {"all", "generate", "verify"}:
+        raise ValueError("data.phase must be one of: all, generate, verify")
+    return phase
 
 
 def candidate_id(

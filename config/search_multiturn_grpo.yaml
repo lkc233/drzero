@@ -10,6 +10,9 @@ trainer:
   iteration_state_path: ${iteration.state_path}
 
 data:
+  # all preserves the legacy single-process flow. iter1_gen_data.sh uses generate
+  # then verify so both phases can independently use all GPUs.
+  phase: all
   # 2048 (not 1536): proposer prompts are built to fit 1536 WITHOUT tools, but sglang
   # re-applies the chat template WITH the search tool schema at rollout, pushing some
   # prompts past 1536. schemas.py does not truncate (only warns), so an over-length
@@ -41,6 +44,7 @@ verify:
   # Run three samples with evidence and three question-only samples. Passing
   # requires >=1 normalized exact match in the first group and 0 in the second.
   solver_samples: 3
+  max_group_concurrency: 8
   allow_search: false
   # Verifier (answer sampling) is the round-start solver being trained; do not point
   # this at a fixed auxiliary model.

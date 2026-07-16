@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
+set -eo pipefail
 set -x
 source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" all
 
@@ -18,15 +19,62 @@ if [ ! -f "/usr/include/python3.10/Python.h" ]; then
     export CPATH="/home/luokc/miniforge3/include/python3.10:${CPATH}"
 fi
 
-# Retriever uses 127.0.0.1:8020 by default. Port 8001 serves the round-start
-# solver; port 8000 remains the local Qwen3.6 judge/updater service.
-kill -9 $(lsof -t -i :8001) 2>/dev/null;
-
-tp=1
-dp=6
-gpus=6            # GPUs 2-7 are all used for generation; verify starts afterward.
+# Generation and verify run
+# sequentially so each phase can independently use all eight local GPUs. Port 8000
+# remains reserved for the local Qwen3.6 judge/updater service.
+generation_tp=1
+verify_tp=1
+verify_dp=8
+gpus=8
 sample_size=5
 rollout_memory_utilization=0.8
+
+VERIFY_SERVER_PID=""
+
+stop_verify_server() {
+    if [ -n "$VERIFY_SERVER_PID" ] && kill -0 "$VERIFY_SERVER_PID" 2>/dev/null; then
+        kill "$VERIFY_SERVER_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            if ! kill -0 "$VERIFY_SERVER_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+        if kill -0 "$VERIFY_SERVER_PID" 2>/dev/null; then
+            kill -9 "$VERIFY_SERVER_PID" 2>/dev/null || true
+        fi
+        wait "$VERIFY_SERVER_PID" 2>/dev/null || true
+    fi
+    VERIFY_SERVER_PID=""
+}
+
+clear_verify_port() {
+    local pids
+    pids="$(lsof -t -i :8001 2>/dev/null || true)"
+    if [ -n "$pids" ]; then
+        kill $pids 2>/dev/null || true
+        sleep 1
+    fi
+}
+
+wait_for_verify_server() {
+    local attempt
+    for attempt in $(seq 1 120); do
+        if curl -fsS http://127.0.0.1:8001/health >/dev/null 2>&1; then
+            return 0
+        fi
+        if ! kill -0 "$VERIFY_SERVER_PID" 2>/dev/null; then
+            echo "Verify server exited before becoming ready" >&2
+            return 1
+        fi
+        sleep 5
+    done
+    echo "Timed out waiting for verify server on port 8001" >&2
+    return 1
+}
+
+trap stop_verify_server EXIT INT TERM
+clear_verify_port
 
 hop_ratio=${1:-4321}
 if [ $# -ge 1 ]; then
@@ -73,10 +121,8 @@ TOOL_CONFIG="$CONFIG_PATH/search_tool_config.yaml"
 TRAIN_DATA="./data/zero_ratio${hop_ratio}.parquet"
 TRAIN_DATA_OUT="./data/zero_${MODEL_PATH}.parquet"
 
-# Generation uses six workers while the proposer checkpoint was saved with eight
-# FSDP shards. Merge once to a world-size-independent HF checkpoint so the rollout
-# workers initialize from the trained proposer without attempting an incompatible
-# 8-way -> 6-way sharded checkpoint load.
+# Merge once to a world-size-independent HF checkpoint so the generation process
+# can start and exit independently from the later verify server.
 if [ "$CACHED_FINGERPRINT" != "$SOURCE_FINGERPRINT" ]; then
     if ! python -m verl.model_merger merge \
         --backend fsdp \
@@ -90,31 +136,62 @@ fi
 
 echo "Logging to: $LOG_FILE"
 
-CUDA_VISIBLE_DEVICES="${GENERATION_GPU_DEVICES:-2,3,4,5,6,7}" python -m verl.trainer.main_generation \
+COMMON_OVERRIDES=(
+    +ckpt_path=null
+    data.prompt_key=prompt
+    +data.path="$TRAIN_DATA"
+    +data.partition="$data_partition"
+    +data.batch_size=512
+    +data.output_path="$TRAIN_DATA_OUT"
+    iteration.state_path="$STATE"
+    verify.solver_model.base_url=http://127.0.0.1:8001
+    verify.solver_model.model_name="$model"
+    actor_rollout_ref.model.path="$MERGED_MODEL_PATH"
+    actor_rollout_ref.rollout.name=sglang
+    actor_rollout_ref.rollout.n="$sample_size"
+    actor_rollout_ref.rollout.temperature=1.0
+    actor_rollout_ref.rollout.top_p=1.0
+    actor_rollout_ref.rollout.prompt_length=2048
+    actor_rollout_ref.rollout.response_length=2560
+    actor_rollout_ref.rollout.max_num_batched_tokens=65536
+    actor_rollout_ref.rollout.tensor_model_parallel_size="$generation_tp"
+    actor_rollout_ref.rollout.gpu_memory_utilization="$rollout_memory_utilization"
+    actor_rollout_ref.rollout.multi_turn.tool_config_path="$TOOL_CONFIG"
+    trainer.nnodes=1
+    trainer.n_gpus_per_node="$gpus"
+)
+
+# Phase 1: eight rollout workers generate candidates. main_generation persists the
+# candidate snapshot, shuts Ray down, and exits before verify starts.
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m verl.trainer.main_generation \
     --config-path="$CONFIG_PATH" \
-    --config-name='search_multiturn_grpo' \
-    +ckpt_path=null \
-    data.prompt_key=prompt \
-    +data.path=$TRAIN_DATA \
-    +data.partition=$data_partition \
-    +data.batch_size=512 \
-    +data.output_path=$TRAIN_DATA_OUT \
-    iteration.state_path="$STATE" \
-    verify.solver_model.base_url="http://127.0.0.1:8001" \
-    verify.solver_model.model_name=${model} \
-    verify.local_server.enabled=true \
-    verify.local_server.model_path=${model} \
-    verify.local_server.gpu_devices="${VERIFY_GPU_DEVICE:-2}" \
-    actor_rollout_ref.model.path=$MERGED_MODEL_PATH \
-    actor_rollout_ref.rollout.name=sglang \
-    actor_rollout_ref.rollout.n=${sample_size} \
-    actor_rollout_ref.rollout.temperature=1.0 \
-    actor_rollout_ref.rollout.top_p=1.0 \
-    actor_rollout_ref.rollout.prompt_length=2048 \
-    actor_rollout_ref.rollout.response_length=2560 \
-    actor_rollout_ref.rollout.max_num_batched_tokens=65536 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=${tp} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_memory_utilization} \
-    actor_rollout_ref.rollout.multi_turn.tool_config_path="$TOOL_CONFIG" \
-    trainer.nnodes=1 \
-    trainer.n_gpus_per_node=${gpus} $@ > "$LOG_FILE" 2>&1
+    --config-name=search_multiturn_grpo \
+    "${COMMON_OVERRIDES[@]}" \
+    "$@" \
+    data.phase=generate > "$LOG_FILE" 2>&1
+
+# Phase 2: replicate the 4B verify model once per GPU. SGLang's DP controller
+# load-balances concurrent candidate groups across all eight replicas.
+clear_verify_port
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m sglang.launch_server \
+    --model="$model" \
+    --port=8001 \
+    --mem-fraction-static=0.8 \
+    --tp-size="$verify_tp" \
+    --dp-size="$verify_dp" \
+    --load-balance-method=shortest_queue \
+    --log-level=error >> "$LOG_FILE" 2>&1 &
+VERIFY_SERVER_PID=$!
+wait_for_verify_server
+
+# The verify-only process does not initialize Ray or the proposer checkpoint. It
+# restores candidates and runs bounded concurrent group verification.
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m verl.trainer.main_generation \
+    --config-path="$CONFIG_PATH" \
+    --config-name=search_multiturn_grpo \
+    "${COMMON_OVERRIDES[@]}" \
+    "$@" \
+    data.phase=verify \
+    data.resume_candidates=true >> "$LOG_FILE" 2>&1
+
+stop_verify_server

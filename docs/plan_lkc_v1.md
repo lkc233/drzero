@@ -145,6 +145,9 @@ verify 不是 keepout 能力评估，也不允许通过外部搜索补足 Eviden
 - 采样数：每组固定 `K=3`，共 6 次。
 - 正确性：使用与 solver reward 一致的归一化 exact match。
 - 输出：保留两组三次完整响应、提取答案和逐次 correctness。
+- 并行：不同 document candidate group 使用有界并发执行，完成记录串行追加到 progress journal。
+
+`gen_data` 在进程层分两次执行：`data.phase=generate` 使用全部 GPU 生成并落盘 candidate snapshot，退出并释放 Ray workers；随后 `data.phase=verify` 跳过 proposer 初始化，从 snapshot 恢复并使用全部 GPU 上的 verifier data-parallel replicas。
 
 ### 6.3 两条件判定
 
@@ -467,6 +470,7 @@ iteration:
 verify:
   enabled: true
   solver_samples: 3
+  max_group_concurrency: 8
   allow_search: false
 
 proposer_reward:
@@ -495,7 +499,7 @@ dynamic_state:
 - `verl/custom_reward/reward_rollout.py`
   - 抽取可复用的批量 rollout client，支持禁用工具的 verifier 模式和完整 trajectory 返回。
 - `verl/trainer/main_generation.py`
-  - 保存 5 个结构化候选、evidence、rubric 评价、排序、顺序 verify 和有效数据。
+  - 以独立 `generate`/`verify` 进程保存 5 个结构化候选、evidence、rubric 评价、并行 verify 和有效数据。
 - `config/search_multiturn_grpo.yaml`
   - 接入新增配置。
 - checkpoint 相关模块

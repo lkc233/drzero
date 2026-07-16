@@ -14,6 +14,7 @@ from verl.iteration.core import (
     Skill,
     StateStore,
     TrajectorySummary,
+    VerifierSample,
     VerifyResult,
     candidate_rank_score,
     diff_by_id,
@@ -39,6 +40,7 @@ from verl.iteration.generation import (
     persist_candidates,
     repair_candidate_snapshot,
     reset_candidate_group,
+    resolve_generation_phase,
     validate_candidate_snapshot_manifest,
     write_candidate_snapshot_manifest,
     write_generation_datasets,
@@ -57,6 +59,7 @@ from verl.iteration.models import (
     UpdateDecision,
     evaluate_rubric_rewards,
     evaluate_rubrics,
+    rank_and_verify_candidate_groups,
     rank_and_verify_candidates,
     validate_evidence_references,
     validate_model_reference,
@@ -125,6 +128,14 @@ def test_proposer_prompt_dataset_is_selected_only_for_proposer_training():
     validate_model_reference("solver-0", "solver-0", role="verify solver")
     with pytest.raises(ValueError, match="does not match"):
         validate_model_reference("wrong", "solver-0", role="verify solver")
+
+
+def test_generation_phase_contract_accepts_split_phases_and_rejects_unknown_values():
+    assert resolve_generation_phase("all") == "all"
+    assert resolve_generation_phase("generate") == "generate"
+    assert resolve_generation_phase("verify") == "verify"
+    with pytest.raises(ValueError, match="data.phase"):
+        resolve_generation_phase("overlap")
 
 
 def test_evidence_extraction_is_complete_and_strict():
@@ -936,6 +947,108 @@ class CandidatePassSolver:
         )
         answer = "Final" if passes_with_evidence else "wrong"
         return f"<answer>{answer}</answer>", 0.01
+
+
+def test_candidate_groups_are_verified_concurrently_with_stable_results():
+    class ConcurrentVerifier:
+        def __init__(self):
+            self.active = 0
+            self.peak_active = 0
+            self.two_groups_started = asyncio.Event()
+
+        async def verify(self, candidate):
+            self.active += 1
+            self.peak_active = max(self.peak_active, self.active)
+            if self.peak_active >= 2:
+                self.two_groups_started.set()
+            await asyncio.wait_for(self.two_groups_started.wait(), timeout=0.5)
+            self.active -= 1
+            correct = [
+                VerifierSample(
+                    sample_index=index,
+                    raw_response="<answer>Final</answer>",
+                    extracted_answer="Final",
+                    correct=index == 0,
+                    latency_seconds=0,
+                )
+                for index in range(3)
+            ]
+            incorrect = [sample.model_copy(update={"correct": False}) for sample in correct]
+            return VerifyResult.from_samples(
+                with_evidence_samples=correct,
+                question_only_samples=incorrect,
+                latency_seconds=0,
+            )
+
+    async def run_groups():
+        completed = []
+
+        async def record_progress(group):
+            completed.append(group[0].doc_id)
+
+        rubrics = initial_rubrics()
+        groups = [
+            [make_candidate(group_index, doc_id=f"doc-{group_index}")]
+            for group_index in range(2)
+        ]
+        verifier = ConcurrentVerifier()
+        winners = await rank_and_verify_candidate_groups(
+            groups,
+            rubrics,
+            FakeJudge(rubrics),
+            verifier,
+            max_concurrency=2,
+            on_group_complete=record_progress,
+        )
+        return winners, completed, verifier.peak_active
+
+    winners, completed, peak_active = asyncio.run(run_groups())
+
+    assert [winner.candidate_id for winner in winners] == ["candidate-0", "candidate-1"]
+    assert sorted(completed) == ["doc-0", "doc-1"]
+    assert peak_active == 2
+
+
+def test_one_candidate_group_error_does_not_stop_other_groups():
+    class OneGroupFailingJudge(FakeJudge):
+        async def complete_structured(self, prompt, response_model):
+            if "Question: q-0" in prompt:
+                raise ModelCallError("group-specific rubric failure")
+            return await super().complete_structured(prompt, response_model)
+
+    async def run_groups():
+        completed = []
+
+        async def record_progress(group):
+            completed.append(group[0].doc_id)
+
+        rubrics = initial_rubrics()
+        groups = [
+            [make_candidate(group_index, doc_id=f"doc-{group_index}")]
+            for group_index in range(2)
+        ]
+        winners = await rank_and_verify_candidate_groups(
+            groups,
+            rubrics,
+            OneGroupFailingJudge(rubrics),
+            ProblemVerifier(
+                TwoConditionSolver(
+                    with_evidence=["Final", "wrong", "wrong"],
+                    question_only=["wrong", "wrong", "wrong"],
+                ),
+                samples=3,
+            ),
+            max_concurrency=2,
+            on_group_complete=record_progress,
+        )
+        return groups, winners, completed
+
+    groups, winners, completed = asyncio.run(run_groups())
+
+    assert winners[0] is None
+    assert winners[1] == groups[1][0]
+    assert groups[0][0].status == "rubric_error"
+    assert sorted(completed) == ["doc-0", "doc-1"]
 
 
 def test_candidates_are_ranked_then_verified_until_first_pass():
