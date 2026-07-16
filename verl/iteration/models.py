@@ -10,11 +10,11 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 import httpx
-from pydantic import Field, model_validator
+from pydantic import Field
 
+from verl.custom_reward.format_scoring import normalize_answer
 from verl.iteration.core import (
     Candidate,
-    CandidateJudgment,
     KeepoutResult,
     Rubric,
     RubricEvaluation,
@@ -34,12 +34,12 @@ from verl.prompts import (
     ANSWER_PATTERN,
     DEFAULT_SOLVER_PREFIX,
     GLOBAL_ANALYSIS_PROMPT,
+    QUESTION_ONLY_VERIFIER_PROMPT,
     RUBRIC_EVALUATION_PROMPT,
     RUBRICS_UPDATE_PROMPT,
     SKILLS_UPDATE_PROMPT,
     TRAJECTORY_ANALYSIS_PROMPT,
     VERIFIER_PROMPT,
-    VERIFY_JUDGE_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,52 +77,6 @@ class RubricEvaluationResponse(StrictModel):
 class SemanticJudgment(StrictModel):
     semantically_equivalent: bool
     reason: str
-
-
-class VerifyDecision(StrictModel):
-    evidence_support: bool
-    question_is_determinate: bool
-    candidate_judgments: list[CandidateJudgment]
-    passed: bool
-    reason: str
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_candidate_judgment_shorthand(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or not isinstance(value.get("candidate_judgments"), list):
-            return value
-        shorthand = {
-            "semantically_equivalent": True,
-            "not_semantically_equivalent": False,
-        }
-        normalized = []
-        changed = False
-        for candidate_index, judgment in enumerate(value["candidate_judgments"]):
-            if isinstance(judgment, str) and judgment in shorthand:
-                normalized.append(
-                    {
-                        "candidate_index": candidate_index,
-                        "semantically_equivalent": shorthand[judgment],
-                        "reason": f"judge shorthand: {judgment}",
-                    }
-                )
-                changed = True
-            else:
-                normalized.append(judgment)
-        if not changed:
-            return value
-        return {**value, "candidate_judgments": normalized}
-
-    @model_validator(mode="after")
-    def validate_passed(self) -> VerifyDecision:
-        expected = (
-            self.evidence_support
-            and self.question_is_determinate
-            and any(item.semantically_equivalent for item in self.candidate_judgments)
-        )
-        if self.passed != expected:
-            raise ValueError("judge passed value violates the verify contract")
-        return self
 
 
 class UpdateDecision(StrictModel):
@@ -384,14 +338,12 @@ class ProblemVerifier:
     def __init__(
         self,
         solver_client: OpenAICompatibleClient,
-        judge_client: OpenAICompatibleClient,
         *,
         samples: int = 3,
     ):
         if samples != 3:
             raise ValueError("the verifier contract requires exactly 3 solver samples")
         self.solver_client = solver_client
-        self.judge_client = judge_client
         self.samples = samples
 
     async def verify(self, candidate: Candidate) -> VerifyResult:
@@ -400,12 +352,17 @@ class ProblemVerifier:
             [item.model_dump(mode="json") for item in candidate.evidence_bundle],
             ensure_ascii=False,
         )
-        prompt = VERIFIER_PROMPT.format(
+        with_evidence_prompt = VERIFIER_PROMPT.format(
             evidence_bundle=evidence_json,
             question=candidate.question,
         )
+        question_only_prompt = QUESTION_ONLY_VERIFIER_PROMPT.format(question=candidate.question)
 
-        async def sample_once(sample_index: int) -> VerifierSample:
+        async def sample_once(
+            prompt: str,
+            sample_index: int,
+            prompt_mode: Literal["with_evidence", "question_only"],
+        ) -> VerifierSample:
             raw, latency = await self.solver_client.complete_text(
                 [{"role": "user", "content": prompt}],
                 temperature=0.7,
@@ -413,26 +370,47 @@ class ProblemVerifier:
             if "<tool_call>" in raw:
                 raise ModelCallError(
                     "verifier attempted a forbidden tool call",
-                    details={"sample_index": sample_index, "raw_output": raw},
+                    details={
+                        "prompt_mode": prompt_mode,
+                        "sample_index": sample_index,
+                        "raw_output": raw,
+                    },
                 )
+            extracted_answer = extract_answer(raw)
             return VerifierSample(
                 sample_index=sample_index,
                 raw_response=raw,
-                extracted_answer=extract_answer(raw),
+                extracted_answer=extracted_answer,
+                correct=normalize_answer(extracted_answer)
+                == normalize_answer(candidate.reference_answer),
                 latency_seconds=latency,
             )
 
         outcomes = await asyncio.gather(
-            *(sample_once(index) for index in range(self.samples)),
+            *(
+                sample_once(with_evidence_prompt, index, "with_evidence")
+                for index in range(self.samples)
+            ),
+            *(
+                sample_once(question_only_prompt, index, "question_only")
+                for index in range(self.samples)
+            ),
             return_exceptions=True,
         )
-        samples = sorted(
-            [outcome for outcome in outcomes if isinstance(outcome, VerifierSample)],
+        with_evidence_outcomes = outcomes[: self.samples]
+        question_only_outcomes = outcomes[self.samples :]
+        with_evidence_samples = sorted(
+            [outcome for outcome in with_evidence_outcomes if isinstance(outcome, VerifierSample)],
+            key=lambda item: item.sample_index,
+        )
+        question_only_samples = sorted(
+            [outcome for outcome in question_only_outcomes if isinstance(outcome, VerifierSample)],
             key=lambda item: item.sample_index,
         )
         sample_failures = [
             {
-                "sample_index": index,
+                "prompt_mode": "with_evidence" if index < self.samples else "question_only",
+                "sample_index": index % self.samples,
                 "error_type": type(outcome).__name__,
                 "reason": str(outcome),
                 "details": getattr(outcome, "details", {}),
@@ -444,51 +422,18 @@ class ProblemVerifier:
             raise ModelCallError(
                 "one or more verifier solver samples failed",
                 details={
-                    "verifier_samples": [item.model_dump(mode="json") for item in samples],
+                    "with_evidence_samples": [
+                        item.model_dump(mode="json") for item in with_evidence_samples
+                    ],
+                    "question_only_samples": [
+                        item.model_dump(mode="json") for item in question_only_samples
+                    ],
                     "sample_failures": sample_failures,
                 },
             )
-        judge_prompt = VERIFY_JUDGE_PROMPT.format(
-            evidence_bundle=evidence_json,
-            question=candidate.question,
-            reference_answer=candidate.reference_answer,
-            candidate_answers=json.dumps(
-                [sample.extracted_answer for sample in samples],
-                ensure_ascii=False,
-            ),
-        )
-        try:
-            decision_model, raw_judge, _ = await self.judge_client.complete_structured(
-                judge_prompt,
-                VerifyDecision,
-            )
-        except Exception as error:
-            raise ModelCallError(
-                "verify judge call failed",
-                details={
-                    "verifier_samples": [item.model_dump(mode="json") for item in samples],
-                    "judge_error": {
-                        "error_type": type(error).__name__,
-                        "reason": str(error),
-                        "details": getattr(error, "details", {}),
-                    },
-                },
-            ) from error
-        decision = VerifyDecision.model_validate(decision_model)
-        expected_indices = set(range(self.samples))
-        actual_indices = {item.candidate_index for item in decision.candidate_judgments}
-        if actual_indices != expected_indices:
-            raise ModelCallError(
-                "verify judge must return one judgment for each solver sample",
-                details={
-                    "verifier_samples": [item.model_dump(mode="json") for item in samples],
-                    "judge_raw_output": raw_judge,
-                },
-            )
-        return VerifyResult(
-            **decision.model_dump(),
-            verifier_samples=samples,
-            judge_raw_output=raw_judge,
+        return VerifyResult.from_samples(
+            with_evidence_samples=with_evidence_samples,
+            question_only_samples=question_only_samples,
             latency_seconds=time.monotonic() - started,
         )
 
@@ -642,7 +587,13 @@ async def rank_and_verify_candidates(
                 "latency_seconds": time.monotonic() - started,
                 "details": getattr(error, "details", {}),
             }
-            raise
+            logger.warning(
+                "Verify failed for %s: %s; details=%s",
+                candidate.candidate_id,
+                error,
+                json.dumps(getattr(error, "details", {}), ensure_ascii=False, default=str),
+            )
+            continue
         candidate.verify_result = result
         candidate.status = "verify_passed" if result.passed else "verify_failed"
         if result.passed:

@@ -49,7 +49,7 @@ _Avoid_: Rubrics optimizer
 ### Data Flow
 
 **Verify**:
-A pre-filter that tests whether a generated question can be answered correctly from its source document by a fixed external model. Questions that fail verify are excluded from solver training.
+A pre-filter with two simultaneous checks against the round-start solver: across three samples it must answer correctly at least once when given the complete evidence bundle, and it must answer incorrectly all three times when given only the question. Correctness uses the same normalized exact-match rule as solver training. Questions that fail either check are excluded from solver training; a candidate-level invocation error is recorded without stopping the remaining verify flow.
 _Avoid_: Validate, check, filter (too generic)
 
 **Trajectory**:

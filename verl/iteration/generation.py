@@ -290,11 +290,26 @@ def candidate_group_is_complete(candidates: list[Candidate], *, verify_enabled: 
         return False
     if not verify_enabled:
         return all(candidate.status in {"format_invalid", "not_verified"} for candidate in candidates)
+    if any(
+        candidate.verify_result is not None
+        and candidate.verify_result.verification_mode != "two_condition_em"
+        for candidate in candidates
+    ):
+        return False
     passed = [candidate for candidate in candidates if candidate.status == "verify_passed"]
     if len(passed) == 1:
-        allowed = {"format_invalid", "verify_passed", "verify_failed", "not_verified"}
+        allowed = {
+            "format_invalid",
+            "verify_passed",
+            "verify_failed",
+            "verify_error",
+            "not_verified",
+        }
         return all(candidate.status in allowed for candidate in candidates)
-    return not passed and all(candidate.status in {"format_invalid", "verify_failed"} for candidate in candidates)
+    return not passed and all(
+        candidate.status in {"format_invalid", "verify_failed", "verify_error"}
+        for candidate in candidates
+    )
 
 
 def reset_candidate_group(candidates: list[Candidate]) -> None:
@@ -538,12 +553,10 @@ def build_generation_summary(
             if candidate.status == "verify_error":
                 failure_reasons["invocation_error"] += 1
             elif result and not result.passed:
-                if not result.evidence_support:
-                    failure_reasons["evidence_unsupported"] += 1
-                if not result.question_is_determinate:
-                    failure_reasons["question_indeterminate"] += 1
-                if not any(item.semantically_equivalent for item in result.candidate_judgments):
-                    failure_reasons["no_equivalent_solver_answer"] += 1
+                if not result.with_evidence_succeeded:
+                    failure_reasons["with_evidence_all_incorrect"] += 1
+                if not result.question_only_all_incorrect:
+                    failure_reasons["question_only_answered_correctly"] += 1
     return {
         "generated_candidate_count": len(candidates),
         "document_count": len(candidate_groups),

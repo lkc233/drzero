@@ -132,54 +132,41 @@ rank_score = 0.5 × format_score + 0.5 × normalized_rubric_mean
 
 verify 检查的是：
 
-1. reference answer 是否被 Evidence Bundle 支持；
-2. question 是否明确、可判定；
-3. 轮初 solver 在只读这些证据时，是否至少一次得到与 reference answer 语义等价的答案。
+1. 轮初 solver 读取完整 Evidence Bundle 和 question 后，3 次回答中是否至少 1 次正确；
+2. 同一 solver 只读取 question 后，3 次回答是否全部错误。
 
 verify 不是 keepout 能力评估，也不允许通过外部搜索补足 Evidence Bundle。
 
 ### 6.2 Verifier 执行
 
 - 模型：轮初 `solver_t`。
-- 输入：Evidence Bundle、question。
+- 输入分两组：Evidence Bundle + question，以及仅 question。
 - 搜索工具：禁用。
-- 采样数：固定默认 `K=3`。
-- 输出：保留三次完整响应及提取后的 candidate answers。
+- 采样数：每组固定 `K=3`，共 6 次。
+- 正确性：使用与 solver reward 一致的归一化 exact match。
+- 输出：保留两组三次完整响应、提取答案和逐次 correctness。
 
-### 6.3 Meta/Judge 判定
+### 6.3 两条件判定
 
-Meta/Judge Model 接收：
+不再调用独立 Meta/Judge。程序直接汇总两组 correctness：
 
-- 完整 Evidence Bundle；
-- question；
-- reference answer；
-- 三个 candidate answers。
+- `with_evidence_succeeded = any(with_evidence_samples[].correct)`；
+- `question_only_all_incorrect = not any(question_only_samples[].correct)`；
+- `passed = with_evidence_succeeded and question_only_all_incorrect`。
 
 结构化输出：
 
 ```json
 {
-  "evidence_support": true,
-  "question_is_determinate": true,
-  "candidate_judgments": [
-    {
-      "candidate_index": 0,
-      "semantically_equivalent": true,
-      "reason": "string"
-    }
-  ],
+  "verification_mode": "two_condition_em",
+  "with_evidence_samples": [{"sample_index": 0, "correct": true}],
+  "question_only_samples": [{"sample_index": 0, "correct": false}],
   "passed": true,
   "reason": "string"
 }
 ```
 
-仅当以下三项同时满足时 `passed=true`：
-
-1. `evidence_support=true`；
-2. `question_is_determinate=true`；
-3. 至少一个 `candidate_judgments[].semantically_equivalent=true`。
-
-每个候选保存 verifier 原始输出、提取答案、judge 原始输出、结构化判定、耗时和失败原因。
+每个候选保存 solver 原始输出、提取答案、correctness、汇总判定、耗时和失败原因。
 
 ## 7. 动态 Skills
 
@@ -459,11 +446,12 @@ State 使用临时文件加原子 rename 写入。每个阶段只有在产物存
 
 ## 15. 失败与恢复语义
 
-用户选择严格失败策略：
+失败策略：
 
-- 任一 verifier、Meta/Judge、rubric、分析或 updater 调用在重试耗尽后，中止本轮；
+- 单个候选的 verifier 调用在重试耗尽后标记 `verify_error`，保存失败详情并继续后续候选；
+- Meta/Judge、rubric、分析或 updater 调用在重试耗尽后，中止本轮；
 - 任一结构化输出解析或 schema 校验最终失败，中止本轮；
-- verify 不因单题故障而静默剔除；故障与“题目验证失败”必须区分；
+- verifier 故障与两条件不成立的 `verify_failed` 必须区分；
 - 不使用旧 skills/rubrics 假装本轮更新成功；
 - 已落盘的原始输出和失败信息必须保留；
 - 修复外部服务或配置后，可从失败阶段幂等恢复。
@@ -537,8 +525,8 @@ dynamic_state:
 2. 缺失或损坏的 tool response 不会产生不完整 Evidence Bundle。
 3. rubric 1–5 分归一化和 rank score 正确。
 4. 候选按稳定顺序依次 verify，并在首个通过后停止。
-5. verify 的三条件缺任一项均失败。
-6. verifier 严格禁用 search tool，且固定生成 3 个样本。
+5. verify 的两个条件缺任一项均失败。
+6. verifier 严格禁用 search tool，且两组各固定生成 3 个样本。
 7. stable `doc_id` 在重跑和数据重排后不变。
 8. group split 不会让同一 `doc_id` 同时进入 train/keepout。
 9. skills 注入顺序稳定，训练和 gen data 使用同一实现。
@@ -558,7 +546,7 @@ dynamic_state:
 4. solver 训练只读取 train manifest。
 5. 新 solver 以 question-only + search 模式产生 keepout trajectory。
 6. 全部 trajectory 被分析并汇总，随后依序更新 skills/rubrics。
-7. 任一模型调用重试耗尽时 iteration 标记 failed，后续阶段不执行。
+7. 单题 verifier 调用重试耗尽时继续后续题；其他模型调用重试耗尽时 iteration 标记 failed。
 8. 从 verify、solver 训练、分析和 updater 等失败点分别恢复时，不重复已完成且校验通过的阶段。
 
 ### 18.3 回归测试
@@ -573,7 +561,7 @@ dynamic_state:
 每轮至少记录：
 
 - 生成候选数、每个排序位置被验证次数、最终通过率；
-- verify 三种失败原因分布；
+- verify 两种条件失败原因和 invocation error 分布；
 - format、difficulty、rubric 和总 proposer reward 分布；
 - train/keepout 的文档数、问题数和 hop 分布；
 - keepout 总体 accuracy；
@@ -587,7 +575,7 @@ dynamic_state:
 以下条件全部满足才视为完成：
 
 1. 单轮严格遵循第四节时序。
-2. verify 使用完整 Evidence Bundle、轮初 solver、禁用搜索、3 次采样和独立 judge 三条件判定。
+2. verify 对“完整 Evidence Bundle + question”和“仅 question”各采样 3 次，并按两个 EM 条件直接判定。
 3. solver train 与 keepout 按 `doc_id` 完全隔离。
 4. 新 solver 的 keepout 结果可逐题追踪到完整 trajectory、judge 和 summary。
 5. 所有 trajectories 均参与分层分析。
@@ -595,4 +583,4 @@ dynamic_state:
 7. skills 先更新，rubrics 使用新 skills 后更新。
 8. iteration state、checkpoint 引用和全部产物可恢复、可审计。
 9. 所有新增测试通过，现有相关测试无回归。
-10. 任一模型调用最终失败时，本轮明确失败，不产生伪完成状态。
+10. verifier 单题故障被隔离并记录；其他模型调用最终失败时，本轮明确失败，不产生伪完成状态。

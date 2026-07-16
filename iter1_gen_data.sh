@@ -44,7 +44,7 @@ model=Qwen/Qwen3-4B-Instruct-2507
 model_name=$(basename "$model" | tr '[:upper:]' '[:lower:]')
 
 # Frozen iteration state produced by iter1_challenger.sh; used for skills injection
-# during generation and for verify (round-start solver + judge).
+# during generation and for verify (round-start solver).
 STATE="./iterations/iter_1/state.json"
 export DRZERO_ITERATION_STATE="$STATE"
 
@@ -87,7 +87,6 @@ if [ "$CACHED_FINGERPRINT" != "$SOURCE_FINGERPRINT" ]; then
     fi
     printf '%s\n' "$SOURCE_FINGERPRINT" > "$MERGE_COMPLETE"
 fi
-
 
 echo "Logging to: $LOG_FILE"
 

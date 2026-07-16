@@ -9,7 +9,6 @@ import pytest
 
 from verl.iteration.core import (
     Candidate,
-    CandidateJudgment,
     Rubric,
     RubricEvaluation,
     Skill,
@@ -56,7 +55,6 @@ from verl.iteration.models import (
     SkillsResponse,
     TrajectoryAnalyzer,
     UpdateDecision,
-    VerifyDecision,
     evaluate_rubric_rewards,
     evaluate_rubrics,
     rank_and_verify_candidates,
@@ -550,21 +548,31 @@ def test_dynamic_schema_limits_and_verify_contract():
                 for index in range(13)
             ]
         )
-    for evidence_support, question_is_determinate, equivalent in (
-        (False, True, True),
-        (True, False, True),
-        (True, True, False),
+    for with_evidence_correct, question_only_correct in (
+        ([False, False, False], [False, False, False]),
+        ([True, False, False], [False, True, False]),
     ):
-        with pytest.raises(ValueError, match="three-condition"):
+        with pytest.raises(ValueError, match="two-condition"):
             VerifyResult(
-                evidence_support=evidence_support,
-                question_is_determinate=question_is_determinate,
-                candidate_judgments=[
-                    CandidateJudgment(
-                        candidate_index=0,
-                        semantically_equivalent=equivalent,
-                        reason="same",
-                    )
+                with_evidence_samples=[
+                    {
+                        "sample_index": index,
+                        "raw_response": "response",
+                        "extracted_answer": "answer",
+                        "correct": correct,
+                        "latency_seconds": 0,
+                    }
+                    for index, correct in enumerate(with_evidence_correct)
+                ],
+                question_only_samples=[
+                    {
+                        "sample_index": index,
+                        "raw_response": "response",
+                        "extracted_answer": "answer",
+                        "correct": correct,
+                        "latency_seconds": 0,
+                    }
+                    for index, correct in enumerate(question_only_correct)
                 ],
                 passed=True,
                 reason="invalid",
@@ -574,39 +582,6 @@ def test_dynamic_schema_limits_and_verify_contract():
     next_skills[0].instruction = "updated"
     skill_diff = diff_by_id(initial_skills(), next_skills)
     assert [item["after"]["id"] for item in skill_diff["modified"]] == [next_skills[0].id]
-
-
-def test_verify_decision_accepts_indexed_semantic_judgment_shorthand():
-    decision = VerifyDecision.model_validate(
-        {
-            "evidence_support": True,
-            "question_is_determinate": True,
-            "candidate_judgments": [
-                "semantically_equivalent",
-                "not_semantically_equivalent",
-                "semantically_equivalent",
-            ],
-            "passed": True,
-            "reason": "The first and third candidate answers match.",
-        }
-    )
-
-    assert [item.candidate_index for item in decision.candidate_judgments] == [0, 1, 2]
-    assert [item.semantically_equivalent for item in decision.candidate_judgments] == [
-        True,
-        False,
-        True,
-    ]
-    with pytest.raises(ValueError, match="candidate_judgments.0"):
-        VerifyDecision.model_validate(
-            {
-                "evidence_support": True,
-                "question_is_determinate": True,
-                "candidate_judgments": ["equivalent"],
-                "passed": True,
-                "reason": "Unsupported shorthand must remain invalid.",
-            }
-        )
 
 
 def test_stable_group_split_never_leaks_doc_ids():
@@ -748,14 +723,46 @@ def test_candidate_snapshot_repair_recovers_prompt_example_failures_and_keeps_ba
 def test_incomplete_candidate_group_is_reset_before_retry():
     candidates = [make_candidate(index, doc_id="doc-0") for index in range(5)]
     candidates[0].status = "verify_failed"
-    candidates[1].status = "verify_error"
-    candidates[1].verify_failure = {"reason": "transient"}
+    candidates[1].status = "ranked"
     assert not candidate_group_is_complete(candidates, verify_enabled=True)
 
     reset_candidate_group(candidates)
 
     assert all(candidate.status == "generated" for candidate in candidates)
     assert all(candidate.verify_failure is None for candidate in candidates)
+
+
+def test_legacy_verify_progress_is_loaded_but_reverified_under_new_contract():
+    candidate = make_candidate(0)
+    candidate.status = "verify_passed"
+    candidate.verify_result = VerifyResult.model_validate(
+        {
+            "evidence_support": True,
+            "question_is_determinate": True,
+            "candidate_judgments": [
+                {
+                    "candidate_index": index,
+                    "semantically_equivalent": index == 0,
+                    "reason": "legacy judge",
+                }
+                for index in range(3)
+            ],
+            "passed": True,
+            "reason": "legacy result",
+            "verifier_samples": [
+                {
+                    "sample_index": index,
+                    "raw_response": "<answer>Final</answer>",
+                    "extracted_answer": "Final",
+                    "latency_seconds": 0,
+                }
+                for index in range(3)
+            ],
+        }
+    )
+
+    assert candidate.verify_result.verification_mode == "legacy_judge"
+    assert not candidate_group_is_complete([candidate], verify_enabled=True)
 
 
 def test_candidate_progress_loader_ignores_a_truncated_final_journal_record(tmp_path):
@@ -822,10 +829,83 @@ class FakeSolver:
         return "<answer>Final</answer>", 0.01
 
 
+class TwoConditionSolver:
+    def __init__(self, *, with_evidence, question_only):
+        self.with_evidence = iter(with_evidence)
+        self.question_only = iter(question_only)
+        self.calls = 0
+
+    async def complete_text(self, messages, *, temperature=0, max_tokens=2048):
+        del temperature, max_tokens
+        self.calls += 1
+        prompt = messages[0]["content"]
+        answers = self.with_evidence if "Evidence bundle:" in prompt else self.question_only
+        return f"<answer>{next(answers)}</answer>", 0.01
+
+
+def test_verify_passes_only_when_evidence_helps_solver_answer():
+    solver = TwoConditionSolver(
+        with_evidence=["wrong", "Final", "wrong"],
+        question_only=["wrong", "still wrong", "unknown"],
+    )
+
+    result = asyncio.run(ProblemVerifier(solver, samples=3).verify(make_candidate(0)))
+
+    assert result.passed
+    assert [sample.correct for sample in result.with_evidence_samples] == [False, True, False]
+    assert [sample.correct for sample in result.question_only_samples] == [False, False, False]
+    assert solver.calls == 6
+
+
+@pytest.mark.parametrize(
+    ("with_evidence", "question_only"),
+    [
+        (["wrong", "still wrong", "unknown"], ["wrong", "still wrong", "unknown"]),
+        (["wrong", "Final", "unknown"], ["wrong", "Final", "unknown"]),
+    ],
+)
+def test_verify_fails_when_either_required_condition_is_false(with_evidence, question_only):
+    solver = TwoConditionSolver(with_evidence=with_evidence, question_only=question_only)
+
+    result = asyncio.run(ProblemVerifier(solver, samples=3).verify(make_candidate(0)))
+
+    assert not result.passed
+
+
+def test_verify_error_is_isolated_to_one_candidate_and_later_candidates_continue():
+    class CandidateAwareSolver:
+        async def complete_text(self, messages, *, temperature=0, max_tokens=2048):
+            del temperature, max_tokens
+            prompt = messages[0]["content"]
+            if "q-0" in prompt:
+                raise ModelCallError("candidate-specific failure")
+            answer = "Final" if "Evidence bundle:" in prompt else "wrong"
+            return f"<answer>{answer}</answer>", 0.01
+
+    rubrics = initial_rubrics()
+    candidates = [make_candidate(index, format_score=1 - index * 0.1) for index in range(3)]
+    winner, ordered, _ = asyncio.run(
+        rank_and_verify_candidates(
+            candidates,
+            rubrics,
+            FakeJudge(rubrics),
+            ProblemVerifier(CandidateAwareSolver(), samples=3),
+        )
+    )
+
+    assert winner == candidates[1]
+    assert [candidate.status for candidate in ordered] == [
+        "verify_error",
+        "verify_passed",
+        "not_verified",
+    ]
+    assert candidates[0].verify_failure["reason"] == "one or more verifier solver samples failed"
+    assert candidate_group_is_complete(candidates, verify_enabled=True)
+
+
 class FakeJudge:
-    def __init__(self, rubrics, pass_index=2):
+    def __init__(self, rubrics):
         self.rubrics = rubrics
-        self.pass_index = pass_index
 
     async def complete_structured(self, prompt, response_model):
         if response_model is RubricEvaluationResponse:
@@ -835,35 +915,37 @@ class FakeJudge:
                     for rubric in self.rubrics
                 ]
             }
-        elif response_model is VerifyDecision:
-            passed = self.pass_index is not None and f"Question: q-{self.pass_index}" in prompt
-            payload = {
-                "evidence_support": True,
-                "question_is_determinate": True,
-                "candidate_judgments": [
-                    {
-                        "candidate_index": index,
-                        "semantically_equivalent": passed and index == 0,
-                        "reason": "match" if passed and index == 0 else "different",
-                    }
-                    for index in range(3)
-                ],
-                "passed": passed,
-                "reason": "decision",
-            }
         else:
             raise AssertionError(response_model)
         return response_model.model_validate(payload), json.dumps(payload), 0.01
 
 
+class CandidatePassSolver:
+    def __init__(self, pass_index):
+        self.pass_index = pass_index
+        self.calls = 0
+
+    async def complete_text(self, messages, *, temperature=0, max_tokens=2048):
+        del temperature, max_tokens
+        self.calls += 1
+        prompt = messages[0]["content"]
+        passes_with_evidence = (
+            self.pass_index is not None
+            and "Evidence bundle:" in prompt
+            and f"Question: q-{self.pass_index}" in prompt
+        )
+        answer = "Final" if passes_with_evidence else "wrong"
+        return f"<answer>{answer}</answer>", 0.01
+
+
 def test_candidates_are_ranked_then_verified_until_first_pass():
     rubrics = initial_rubrics()
     candidates = [make_candidate(index, format_score=1 - index * 0.1) for index in range(5)]
-    solver = FakeSolver()
+    solver = CandidatePassSolver(pass_index=2)
     judge = FakeJudge(rubrics)
     with pytest.raises(ValueError, match="exactly 3"):
-        ProblemVerifier(solver, judge, samples=2)
-    verifier = ProblemVerifier(solver, judge, samples=3)
+        ProblemVerifier(solver, samples=2)
+    verifier = ProblemVerifier(solver, samples=3)
     winner, ordered, _ = asyncio.run(
         rank_and_verify_candidates(candidates, rubrics, judge, verifier)
     )
@@ -875,21 +957,21 @@ def test_candidates_are_ranked_then_verified_until_first_pass():
         "not_verified",
         "not_verified",
     ]
-    assert solver.calls == 9
+    assert solver.calls == 18
 
 
 def test_all_semantic_verify_failures_return_no_selection_without_masking_errors():
     rubrics = initial_rubrics()
     candidates = [make_candidate(index, format_score=1 - index * 0.1) for index in range(5)]
-    solver = FakeSolver()
-    judge = FakeJudge(rubrics, pass_index=None)
-    verifier = ProblemVerifier(solver, judge, samples=3)
+    solver = CandidatePassSolver(pass_index=None)
+    judge = FakeJudge(rubrics)
+    verifier = ProblemVerifier(solver, samples=3)
     winner, ordered, _ = asyncio.run(
         rank_and_verify_candidates(candidates, rubrics, judge, verifier)
     )
     assert winner is None
     assert all(item.status == "verify_failed" for item in ordered)
-    assert solver.calls == 15
+    assert solver.calls == 30
 
 
 class FakeUpdaterClient:
@@ -1025,10 +1107,11 @@ def test_verifier_failure_retains_completed_sample_outputs():
             return f"<answer>answer-{self.calls}</answer>", 0.01
 
     solver = PartiallyFailingSolver()
-    verifier = ProblemVerifier(solver, FakeJudge(initial_rubrics()), samples=3)
+    verifier = ProblemVerifier(solver, samples=3)
     with pytest.raises(ModelCallError) as raised:
         asyncio.run(verifier.verify(make_candidate(0)))
-    assert len(raised.value.details["verifier_samples"]) == 2
+    assert len(raised.value.details["with_evidence_samples"]) == 2
+    assert len(raised.value.details["question_only_samples"]) == 3
     assert raised.value.details["sample_failures"][0]["details"]["raw_output"] == (
         "<tool_call>forbidden</tool_call>"
     )
@@ -1036,8 +1119,9 @@ def test_verifier_failure_retains_completed_sample_outputs():
 
 class FullRoundClient:
     async def complete_text(self, messages, *, temperature=0, max_tokens=2048):
-        del messages, temperature, max_tokens
-        return "<answer>Final</answer>", 0.01
+        del temperature, max_tokens
+        answer = "Final" if "Evidence bundle:" in messages[0]["content"] else "wrong"
+        return f"<answer>{answer}</answer>", 0.01
 
     async def complete_structured(self, prompt, response_model):
         if response_model is RubricEvaluationResponse:
@@ -1046,21 +1130,6 @@ class FullRoundClient:
                     {"rubric_id": rubric.id, "score": 5, "reason": "supported"}
                     for rubric in initial_rubrics()
                 ]
-            }
-        elif response_model is VerifyDecision:
-            payload = {
-                "evidence_support": True,
-                "question_is_determinate": True,
-                "candidate_judgments": [
-                    {
-                        "candidate_index": index,
-                        "semantically_equivalent": index == 0,
-                        "reason": "match" if index == 0 else "alternative",
-                    }
-                    for index in range(3)
-                ],
-                "passed": True,
-                "reason": "supported",
             }
         elif response_model is SemanticJudgment:
             payload = {"semantically_equivalent": True, "reason": "same answer"}
@@ -1125,7 +1194,7 @@ def test_mock_full_round_flows_through_verify_keepout_analysis_and_updates():
     async def run_round():
         rubrics = initial_rubrics()
         client = FullRoundClient()
-        verifier = ProblemVerifier(client, client, samples=3)
+        verifier = ProblemVerifier(client, samples=3)
         selected = []
         for doc_index in range(30):
             group = [

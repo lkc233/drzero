@@ -142,6 +142,13 @@ Question: {question}
 """
 
 
+QUESTION_ONLY_VERIFIER_PROMPT = """Answer the generated question without using external search or tools.
+Return one concise answer in <answer>...</answer>.
+
+Question: {question}
+"""
+
+
 RUBRIC_EVALUATION_PROMPT = """Evaluate one generated multi-hop problem against every active rubric.
 Use the seed document and the complete proposer trajectory. Return JSON only with this shape:
 {{"evaluations":[{{"rubric_id":"...","score":1,"reason":"..."}}]}}.
@@ -159,27 +166,6 @@ Proposer trajectory:
 
 Question: {question}
 Reference answer: {reference_answer}
-"""
-
-
-VERIFY_JUDGE_PROMPT = """Judge whether a generated problem is valid using only the supplied evidence.
-Return JSON only with this exact shape:
-{{"evidence_support":true,"question_is_determinate":true,"candidate_judgments":[
-{{"candidate_index":0,"semantically_equivalent":true,"reason":"..."}},
-{{"candidate_index":1,"semantically_equivalent":false,"reason":"..."}},
-{{"candidate_index":2,"semantically_equivalent":false,"reason":"..."}}],
-"passed":true,"reason":"..."}}.
-candidate_judgments must contain exactly one object for each candidate answer, indexed 0 through 2.
-Do not return strings in candidate_judgments.
-passed must be true exactly when the evidence supports the reference answer, the question is determinate,
-and at least one candidate answer is semantically equivalent to the reference answer.
-
-Evidence bundle:
-{evidence_bundle}
-
-Question: {question}
-Reference answer: {reference_answer}
-Candidate answers: {candidate_answers}
 """
 
 

@@ -56,39 +56,125 @@ class EvidenceItem(StrictModel):
     trajectory_index: int = Field(ge=0)
 
 
-class CandidateJudgment(StrictModel):
-    candidate_index: int = Field(ge=0)
-    semantically_equivalent: bool
-    reason: str
-
-
 class VerifierSample(StrictModel):
     sample_index: int = Field(ge=0)
     raw_response: str
     extracted_answer: str
+    correct: bool
     latency_seconds: float = Field(ge=0)
 
 
 class VerifyResult(StrictModel):
-    evidence_support: bool
-    question_is_determinate: bool
-    candidate_judgments: list[CandidateJudgment]
+    verification_mode: Literal["legacy_judge", "two_condition_em"] = "two_condition_em"
+    with_evidence_samples: list[VerifierSample] = Field(default_factory=list)
+    question_only_samples: list[VerifierSample] = Field(default_factory=list)
     passed: bool
     reason: str
-    verifier_samples: list[VerifierSample] = Field(default_factory=list)
-    judge_raw_output: str = ""
     latency_seconds: float = Field(default=0, ge=0)
     failure_reason: str | None = None
 
+    @staticmethod
+    def evaluate_conditions(
+        with_evidence_samples: list[VerifierSample],
+        question_only_samples: list[VerifierSample],
+    ) -> tuple[bool, bool]:
+        return (
+            any(sample.correct for sample in with_evidence_samples),
+            not any(sample.correct for sample in question_only_samples),
+        )
+
+    @property
+    def with_evidence_succeeded(self) -> bool:
+        return self.evaluate_conditions(self.with_evidence_samples, self.question_only_samples)[0]
+
+    @property
+    def question_only_all_incorrect(self) -> bool:
+        return self.evaluate_conditions(self.with_evidence_samples, self.question_only_samples)[1]
+
+    @classmethod
+    def from_samples(
+        cls,
+        *,
+        with_evidence_samples: list[VerifierSample],
+        question_only_samples: list[VerifierSample],
+        latency_seconds: float,
+    ) -> VerifyResult:
+        with_evidence_succeeded, question_only_all_incorrect = cls.evaluate_conditions(
+            with_evidence_samples,
+            question_only_samples,
+        )
+        passed = with_evidence_succeeded and question_only_all_incorrect
+        return cls(
+            verification_mode="two_condition_em",
+            with_evidence_samples=with_evidence_samples,
+            question_only_samples=question_only_samples,
+            passed=passed,
+            reason=(
+                "with-evidence solver succeeded and question-only solver failed"
+                if passed
+                else (
+                    "two-condition verify failed: "
+                    f"with_evidence_succeeded={with_evidence_succeeded}, "
+                    f"question_only_all_incorrect={question_only_all_incorrect}"
+                )
+            ),
+            latency_seconds=latency_seconds,
+        )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_judge_result(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "with_evidence_samples" in value:
+            return value
+        if "verifier_samples" not in value:
+            return value
+
+        judgments = {}
+        for item in value.get("candidate_judgments", []):
+            item = item.model_dump() if hasattr(item, "model_dump") else item
+            if isinstance(item, dict):
+                judgments[item.get("candidate_index")] = bool(item.get("semantically_equivalent"))
+        legacy_expected = (
+            bool(value.get("evidence_support"))
+            and bool(value.get("question_is_determinate"))
+            and any(judgments.values())
+        )
+        if bool(value.get("passed")) != legacy_expected:
+            raise ValueError("passed must equal the three-condition verify contract")
+        samples = [
+            {
+                **sample,
+                "correct": judgments.get(sample.get("sample_index"), False),
+            }
+            for sample in value.get("verifier_samples", [])
+        ]
+        return {
+            "verification_mode": "legacy_judge",
+            "with_evidence_samples": samples,
+            "question_only_samples": [],
+            "passed": value.get("passed", False),
+            "reason": value.get("reason", "legacy judge result"),
+            "latency_seconds": value.get("latency_seconds", 0),
+            "failure_reason": value.get("failure_reason"),
+        }
+
     @model_validator(mode="after")
     def validate_pass_contract(self) -> VerifyResult:
-        expected = (
-            self.evidence_support
-            and self.question_is_determinate
-            and any(item.semantically_equivalent for item in self.candidate_judgments)
-        )
+        if self.verification_mode == "legacy_judge":
+            return self
+        expected_indices = set(range(3))
+        with_evidence_indices = {sample.sample_index for sample in self.with_evidence_samples}
+        question_only_indices = {sample.sample_index for sample in self.question_only_samples}
+        if (
+            len(self.with_evidence_samples) != 3
+            or len(self.question_only_samples) != 3
+            or with_evidence_indices != expected_indices
+            or question_only_indices != expected_indices
+        ):
+            raise ValueError("two-condition verify requires exactly 3 samples for each prompt")
+        expected = self.with_evidence_succeeded and self.question_only_all_incorrect
         if self.passed != expected:
-            raise ValueError("passed must equal the three-condition verify contract")
+            raise ValueError("passed must equal the two-condition verify contract")
         return self
 
 
