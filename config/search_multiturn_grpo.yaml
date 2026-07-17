@@ -44,7 +44,7 @@ verify:
   # Run three samples with evidence and three question-only samples. Passing
   # requires >=1 normalized exact match in the first group and 0 in the second.
   solver_samples: 3
-  max_group_concurrency: 32
+  max_group_concurrency: 64
   allow_search: false
   # Verifier (answer sampling) is the round-start solver being trained; do not point
   # this at a fixed auxiliary model.
@@ -54,7 +54,7 @@ verify:
     api_key_env: null
     timeout_seconds: 120
     max_retries: 3
-    max_concurrency: 32
+    max_concurrency: 128
   # main_generation releases all generation workers, then starts this solver only
   # for the serial verify phase. Training scripts opt in explicitly.
   local_server:
