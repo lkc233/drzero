@@ -40,7 +40,7 @@ CHALLENGER_NAME="challenger_iter${cur_iter}_ratio${hop_ratio}_${challenger_algor
 SOLVER_NAME="solver_iter${cur_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}_${model_name}"
 
 TRAIN_DATA="./data/zero_${CHALLENGER_NAME}.parquet"
-VAL_DATA="./data/test_1200.parquet"
+VAL_DATA="./data/test_musique.parquet"
 VAL_DATA_DIR="./data/${SOLVER_NAME}"
 
 RESUME_PATH="./checkpoints/dr-zero/solver_iter${prev_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}_${model_name}/solver_iter${prev_iter}_hf"

@@ -57,10 +57,7 @@ SOLVER_NAME="solver_iter1_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}
 
 TRAIN_DATA="./data/zero_${CHALLENGER_NAME}.parquet"
 VAL_DATA_DIR="./data/${SOLVER_NAME}"
-VAL_DATA="./data/test_sampled.parquet"
-if [ ! -f "$VAL_DATA" ]; then
-    VAL_DATA="./data/test.parquet"
-fi
+VAL_DATA="./data/test_musique.parquet"
 
 python -m verl.trainer.main_ppo \
     --config-path="$CONFIG_PATH" \

@@ -72,7 +72,13 @@ Before the first iteration, prepare the initial prompts for training and the ben
 ```bash
 python process_train.py --local_dir ./data
 python process_test.py --local_dir ./data
+python scripts/filter_validation_set.py
 ```
+
+Solver validation uses `data/test_musique.parquet`, containing all 2,417 MuSiQue
+examples from `data/test.parquet`. No sampling is applied. The filtering command
+fails if the source does not contain exactly 2,417 MuSiQue rows. All iteration
+solver scripts use this same validation set.
 
 ### Iteration 1
 
