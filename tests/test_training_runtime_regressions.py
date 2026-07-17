@@ -34,6 +34,15 @@ def test_multiround_pipeline_can_resume_at_solver_then_run_later_rounds():
     assert "start_stage=challenger" in script
 
 
+def test_multiround_pipeline_records_each_stage_timing():
+    script = Path("run_multiround_training.sh").read_text()
+
+    assert 'timing_log="${TRAINING_TIMING_LOG:-$SCRIPT_DIR/logs/training_timing.tsv}"' in script
+    for stage in ("challenger", "data_generation", "solver", "convert", "update_state"):
+        assert f'run_timed_stage "$iteration" {stage}' in script
+    assert 'elapsed_seconds=$((finished_epoch - started_epoch))' in script
+
+
 def test_standalone_worker_receives_environment_before_base_init(monkeypatch):
     monkeypatch.delenv("WORLD_SIZE", raising=False)
 

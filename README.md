@@ -122,6 +122,10 @@ completed Challenger and data-generation stages; later iterations run in full:
 ROUNDS=3 START_ITERATION=1 START_STAGE=solver bash run_multiround_training.sh
 ```
 
+The pipeline prints each stage's start time, finish time, elapsed seconds, and
+exit status to the main log. It also appends tab-separated timing records to
+`logs/training_timing.tsv`; override the path with `TRAINING_TIMING_LOG`.
+
 ### Local and remote service topologies
 
 The training code uses the same Retriever and OpenAI-compatible judge contracts

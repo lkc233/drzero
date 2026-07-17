@@ -10,6 +10,8 @@ hop_ratio="${HOP_RATIO:-4321}"
 rounds="${ROUNDS:-3}"
 start_iteration="${START_ITERATION:-1}"
 start_stage="${START_STAGE:-challenger}"
+timing_log="${TRAINING_TIMING_LOG:-$SCRIPT_DIR/logs/training_timing.tsv}"
+mkdir -p "$(dirname "$timing_log")"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 # Ray's local dashboard/runtime-env agents communicate over loopback and the
 # node address.  Bypass the cluster HTTP proxy for those local control-plane
@@ -30,6 +32,26 @@ if [[ "$start_stage" != "challenger" && "$start_stage" != "solver" ]]; then
 fi
 
 judge_stopped_for_solver=false
+
+run_timed_stage() {
+    local iteration="$1"
+    local stage="$2"
+    shift 2
+    local started_at started_epoch finished_at finished_epoch elapsed_seconds status
+    started_at="$(date -Is)"
+    started_epoch="$(date +%s)"
+    echo "[$started_at] Starting iteration $iteration stage $stage"
+    status=0
+    "$@" || status=$?
+    finished_at="$(date -Is)"
+    finished_epoch="$(date +%s)"
+    elapsed_seconds=$((finished_epoch - started_epoch))
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$iteration" "$stage" "$started_at" "$finished_at" "$elapsed_seconds" "$status" \
+        >> "$timing_log"
+    echo "[$finished_at] Finished iteration $iteration stage $stage in ${elapsed_seconds}s (status=$status)"
+    return "$status"
+}
 
 start_local_judge() {
     tmux new-session -d -s qwen36 \
@@ -77,20 +99,20 @@ restore_local_judge() {
 for iteration in $(seq "$start_iteration" "$rounds"); do
     echo "[$(date -Is)] Starting iteration $iteration/$rounds"
     if [[ "$iteration" != "$start_iteration" || "$start_stage" == "challenger" ]]; then
-        bash "iter${iteration}_challenger.sh" "$hop_ratio"
-        bash "iter${iteration}_gen_data.sh" "$hop_ratio"
+        run_timed_stage "$iteration" challenger bash "iter${iteration}_challenger.sh" "$hop_ratio"
+        run_timed_stage "$iteration" data_generation bash "iter${iteration}_gen_data.sh" "$hop_ratio"
     else
         echo "[$(date -Is)] Resuming iteration $iteration at Solver"
     fi
     trap restore_local_judge EXIT
     stop_local_judge_for_solver
-    bash "iter${iteration}_solver.sh" "$hop_ratio"
+    run_timed_stage "$iteration" solver bash "iter${iteration}_solver.sh" "$hop_ratio"
     restore_local_judge
     trap - EXIT
-    bash convert.sh "$iteration" "$hop_ratio"
+    run_timed_stage "$iteration" convert bash convert.sh "$iteration" "$hop_ratio"
     # Training, generation/verify, and update are intentionally serial. Solver
     # temporarily owns all eight GPUs; the other stages use GPUs 2-7.
-    bash update_iteration_state.sh "$iteration" "$hop_ratio"
+    run_timed_stage "$iteration" update_state bash update_iteration_state.sh "$iteration" "$hop_ratio"
     echo "[$(date -Is)] Completed iteration $iteration/$rounds"
     start_stage=challenger
 done
