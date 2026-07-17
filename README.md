@@ -114,6 +114,14 @@ Start all three persistent services/jobs with the checked-in tmux launcher:
 bash start_training_tmux.sh
 ```
 
+To resume the complete pipeline at a particular iteration's Solver stage, set
+`START_ITERATION` and `START_STAGE`. The first iteration skips its already
+completed Challenger and data-generation stages; later iterations run in full:
+
+```bash
+ROUNDS=3 START_ITERATION=1 START_STAGE=solver bash run_multiround_training.sh
+```
+
 ### Local and remote service topologies
 
 The training code uses the same Retriever and OpenAI-compatible judge contracts

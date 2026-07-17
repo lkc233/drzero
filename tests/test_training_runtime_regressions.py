@@ -24,6 +24,16 @@ def test_challenger_rollouts_use_one_model_replica_per_gpu():
         assert "--dp-size=${dp}" in script
 
 
+def test_multiround_pipeline_can_resume_at_solver_then_run_later_rounds():
+    script = Path("run_multiround_training.sh").read_text()
+
+    assert 'start_iteration="${START_ITERATION:-1}"' in script
+    assert 'start_stage="${START_STAGE:-challenger}"' in script
+    assert 'for iteration in $(seq "$start_iteration" "$rounds")' in script
+    assert '"$iteration" != "$start_iteration" || "$start_stage" == "challenger"' in script
+    assert "start_stage=challenger" in script
+
+
 def test_standalone_worker_receives_environment_before_base_init(monkeypatch):
     monkeypatch.delenv("WORLD_SIZE", raising=False)
 

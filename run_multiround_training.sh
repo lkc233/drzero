@@ -8,6 +8,8 @@ source "$SCRIPT_DIR/scripts/load_deployment_config.sh"
 
 hop_ratio="${HOP_RATIO:-4321}"
 rounds="${ROUNDS:-3}"
+start_iteration="${START_ITERATION:-1}"
+start_stage="${START_STAGE:-challenger}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 # Ray's local dashboard/runtime-env agents communicate over loopback and the
 # node address.  Bypass the cluster HTTP proxy for those local control-plane
@@ -16,7 +18,16 @@ local_hosts="127.0.0.1,localhost,::1,$(hostname),$(hostname -i | tr ' ' ',')"
 export NO_PROXY="${local_hosts},${NO_PROXY:-}"
 export no_proxy="$NO_PROXY"
 
+if (( start_iteration < 1 || start_iteration > rounds )); then
+    echo "ERROR: START_ITERATION must be between 1 and ROUNDS ($rounds)" >&2
+    exit 2
+fi
+
 scripts/check_deployment_services.sh all
+if [[ "$start_stage" != "challenger" && "$start_stage" != "solver" ]]; then
+    echo "ERROR: START_STAGE must be 'challenger' or 'solver'" >&2
+    exit 2
+fi
 
 judge_stopped_for_solver=false
 
@@ -37,14 +48,24 @@ stop_local_judge_for_solver() {
     fi
     tmux kill-session -t qwen36
     judge_stopped_for_solver=true
+    judge_pids="$(lsof -t -i ":${JUDGE_PORT:-8000}" 2>/dev/null || true)"
+    if [[ -n "$judge_pids" ]]; then
+        kill $judge_pids 2>/dev/null || true
+    fi
     for _ in $(seq 1 30); do
         if ! lsof -t -i ":${JUDGE_PORT:-8000}" >/dev/null 2>&1; then
             return
         fi
         sleep 1
     done
-    echo "ERROR: Qwen3.6 did not release port ${JUDGE_PORT:-8000} within 30 seconds" >&2
-    return 1
+    judge_pids="$(lsof -t -i ":${JUDGE_PORT:-8000}" 2>/dev/null || true)"
+    if [[ -n "$judge_pids" ]]; then
+        kill -9 $judge_pids 2>/dev/null || true
+    fi
+    if lsof -t -i ":${JUDGE_PORT:-8000}" >/dev/null 2>&1; then
+        echo "ERROR: Qwen3.6 did not release port ${JUDGE_PORT:-8000}" >&2
+        return 1
+    fi
 }
 
 restore_local_judge() {
@@ -53,10 +74,14 @@ restore_local_judge() {
     fi
 }
 
-for iteration in $(seq 1 "$rounds"); do
+for iteration in $(seq "$start_iteration" "$rounds"); do
     echo "[$(date -Is)] Starting iteration $iteration/$rounds"
-    bash "iter${iteration}_challenger.sh" "$hop_ratio"
-    bash "iter${iteration}_gen_data.sh" "$hop_ratio"
+    if [[ "$iteration" != "$start_iteration" || "$start_stage" == "challenger" ]]; then
+        bash "iter${iteration}_challenger.sh" "$hop_ratio"
+        bash "iter${iteration}_gen_data.sh" "$hop_ratio"
+    else
+        echo "[$(date -Is)] Resuming iteration $iteration at Solver"
+    fi
     trap restore_local_judge EXIT
     stop_local_judge_for_solver
     bash "iter${iteration}_solver.sh" "$hop_ratio"
@@ -67,4 +92,5 @@ for iteration in $(seq 1 "$rounds"); do
     # temporarily owns all eight GPUs; the other stages use GPUs 2-7.
     bash update_iteration_state.sh "$iteration" "$hop_ratio"
     echo "[$(date -Is)] Completed iteration $iteration/$rounds"
+    start_stage=challenger
 done
