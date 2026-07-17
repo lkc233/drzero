@@ -96,13 +96,16 @@ OpenAI-compatible endpoint. Override `GPU_DEVICES`, `JUDGE_TP_SIZE`,
 `JUDGE_PORT`, or `JUDGE_CONTEXT_LENGTH` when launching it. If the endpoint or
 served model changes, set `DRZERO_META_BASE_URL` / `DRZERO_META_MODEL` and
 `DRZERO_UPDATER_BASE_URL` / `DRZERO_UPDATER_MODEL` before running the pipeline.
-The current scripts colocate this service and the retriever on GPUs 0-1, and use
-all of GPUs 2-7 for training and generation. Verification runs only after the
-generation workers exit, then reuses GPU 2; GPU 7 is not reserved. Qwen3.6
+The current scripts colocate this service and the retriever on GPUs 0-1. The
+Challenger and generation stages use GPUs 2-7, while Solver training defaults
+to all eight GPUs because it does not call Qwen3.6. Stop the local Qwen3.6
+service before starting a Solver stage so GPUs 0-1 are available. Verification
+runs only after the generation workers exit, then reuses GPU 2; GPU 7 is not reserved. Qwen3.6
 defaults to tensor parallel size 2 and an 80% total-device static-memory target;
 with the retriever already resident this leaves Qwen enough Mamba/KV cache while retaining
 headroom. Override
-`TRAIN_GPU_DEVICES` or `GENERATION_GPU_DEVICES` if your placement differs. Each
+`TRAIN_GPU_DEVICES`, `SOLVER_GPU_DEVICES`, or `GENERATION_GPU_DEVICES` if your
+placement differs. Each
 judge-dependent stage checks `/v1/models` before starting.
 
 Start all three persistent services/jobs with the checked-in tmux launcher:

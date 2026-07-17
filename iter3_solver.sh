@@ -5,17 +5,18 @@ set -euo pipefail
 set -x
 source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" retriever
 
-export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-2,3,4,5,6,7}"
+export CUDA_VISIBLE_DEVICES="$SOLVER_GPU_DEVICES"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
-# Keep :8000 alive: it is the local Qwen3.6 judge/updater service.
+# Solver training does not use the Qwen3.6 judge. Stop it before launching this
+# script to release GPUs 0-1.
 
 cur_iter=3
 prev_iter=2
 
 tp=2
-dp=3
-gpus=6
+dp=4
+gpus=8
 batch_per_gpu=2
 rollout_memory_utilization=0.5
 

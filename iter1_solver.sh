@@ -8,8 +8,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" retriever
 # --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
 export CC=/usr/bin/gcc
 export CXX=/usr/bin/g++
-# GPUs 0-1 host Qwen3.6 and the retriever; training uses GPUs 2-7.
-export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-2,3,4,5,6,7}"
+# Stop the judge service before launching this script to release GPUs 0-1.
+export CUDA_VISIBLE_DEVICES="$SOLVER_GPU_DEVICES"
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
@@ -29,8 +29,8 @@ if [ -n "$existing_server_pids" ]; then
 fi
 
 tp=2
-dp=3
-gpus=6
+dp=4
+gpus=8
 batch_per_gpu=2
 rollout_memory_utilization=0.5
 
