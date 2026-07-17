@@ -23,7 +23,10 @@ if [ ! -f "/usr/include/python3.10/Python.h" ]; then
 fi
 
 # The local retriever is expected at 127.0.0.1:8020 by default.
-kill -9 $(lsof -t -i :8001) 2>/dev/null;
+existing_server_pids="$(lsof -t -i :8001 2>/dev/null || true)"
+if [ -n "$existing_server_pids" ]; then
+    kill -9 $existing_server_pids 2>/dev/null || true
+fi
 
 tp=2
 dp=3
