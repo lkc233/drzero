@@ -107,11 +107,13 @@ for iteration in $(seq "$start_iteration" "$rounds"); do
     trap restore_local_judge EXIT
     stop_local_judge_for_solver
     run_timed_stage "$iteration" solver bash "iter${iteration}_solver.sh" "$hop_ratio"
+    run_timed_stage "$iteration" convert bash convert.sh "$iteration" "$hop_ratio"
+    run_timed_stage "$iteration" full_test bash evaluate_solver.sh "$iteration" "$hop_ratio"
     restore_local_judge
     trap - EXIT
-    run_timed_stage "$iteration" convert bash convert.sh "$iteration" "$hop_ratio"
     # Training, generation/verify, and update are intentionally serial. Solver
-    # temporarily owns all eight GPUs; the other stages use GPUs 2-7.
+    # and full-test evaluation temporarily own all eight GPUs; the other stages
+    # use GPUs 2-7.
     run_timed_stage "$iteration" update_state bash update_iteration_state.sh "$iteration" "$hop_ratio"
     echo "[$(date -Is)] Completed iteration $iteration/$rounds"
     start_stage=challenger

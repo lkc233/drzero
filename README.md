@@ -126,6 +126,14 @@ The pipeline prints each stage's start time, finish time, elapsed seconds, and
 exit status to the main log. It also appends tab-separated timing records to
 `logs/training_timing.tsv`; override the path with `TRAINING_TIMING_LOG`.
 
+After each Solver finishes, the pipeline converts its checkpoint and evaluates
+it on every row of `data/test_sampled.parquet` (currently 6,125 examples,
+without further sampling). Per-example generations are written under
+`data/solver_iterN_*_full_test`. Override the dataset and validation batch size
+with `SOLVER_TEST_DATA` and `SOLVER_TEST_BATCH_SIZE`.
+The evaluation GPU count is derived from `SOLVER_GPU_DEVICES`; its tensor
+parallel size defaults to 2 and can be changed with `SOLVER_TEST_TP_SIZE`.
+
 ### Local and remote service topologies
 
 The training code uses the same Retriever and OpenAI-compatible judge contracts

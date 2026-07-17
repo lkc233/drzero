@@ -38,9 +38,21 @@ def test_multiround_pipeline_records_each_stage_timing():
     script = Path("run_multiround_training.sh").read_text()
 
     assert 'timing_log="${TRAINING_TIMING_LOG:-$SCRIPT_DIR/logs/training_timing.tsv}"' in script
-    for stage in ("challenger", "data_generation", "solver", "convert", "update_state"):
+    for stage in ("challenger", "data_generation", "solver", "convert", "full_test", "update_state"):
         assert f'run_timed_stage "$iteration" {stage}' in script
     assert 'elapsed_seconds=$((finished_epoch - started_epoch))' in script
+
+
+def test_solver_full_evaluation_uses_the_complete_test_set():
+    script = Path("evaluate_solver.sh").read_text()
+
+    assert 'test_data="${SOLVER_TEST_DATA:-./data/test_sampled.parquet}"' in script
+    assert 'data.val_files="$test_data"' in script
+    assert 'trainer.val_only=True' in script
+    assert 'actor_rollout_ref.rollout.n=1' in script
+    assert 'actor_rollout_ref.rollout.val_kwargs.n=1' in script
+    assert 'gpu_count="$(awk -F, \'{print NF}\' <<<"$CUDA_VISIBLE_DEVICES")"' in script
+    assert 'trainer.n_gpus_per_node="$gpu_count"' in script
 
 
 def test_standalone_worker_receives_environment_before_base_init(monkeypatch):
