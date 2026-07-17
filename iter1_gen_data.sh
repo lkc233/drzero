@@ -170,8 +170,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m verl.trainer.main_generation \
     "$@" \
     data.phase=generate > "$LOG_FILE" 2>&1
 
-# Phase 2: replicate the 4B verify model once per GPU. SGLang's DP controller
-# load-balances concurrent candidate groups across all eight replicas.
+# Phase 2: replicate the 4B verify model once per GPU. This SGLang version
+# implements round_robin for its DP controller; shortest_queue is only a stub that
+# raises NotImplementedError on the first request.
 clear_verify_port
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m sglang.launch_server \
     --model="$model" \
@@ -179,7 +180,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m sglang.launch_server \
     --mem-fraction-static=0.8 \
     --tp-size="$verify_tp" \
     --dp-size="$verify_dp" \
-    --load-balance-method=shortest_queue \
+    --load-balance-method=round_robin \
     --log-level=error >> "$LOG_FILE" 2>&1 &
 VERIFY_SERVER_PID=$!
 wait_for_verify_server

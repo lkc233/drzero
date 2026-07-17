@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -136,6 +137,13 @@ def test_generation_phase_contract_accepts_split_phases_and_rejects_unknown_valu
     assert resolve_generation_phase("verify") == "verify"
     with pytest.raises(ValueError, match="data.phase"):
         resolve_generation_phase("overlap")
+
+
+def test_iter1_verify_server_uses_supported_data_parallel_scheduler():
+    script = Path(__file__).parents[1].joinpath("iter1_gen_data.sh").read_text()
+
+    assert "--dp-size=\"$verify_dp\"" in script
+    assert "--load-balance-method=round_robin" in script
 
 
 def test_evidence_extraction_is_complete_and_strict():
