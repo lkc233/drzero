@@ -411,7 +411,11 @@ def stable_document_id(document: str, source_id: str | int | None = None) -> str
 
 def _parse_tool_call(raw: str | dict[str, Any]) -> str:
     payload = raw if isinstance(raw, dict) else json.loads(raw.strip())
+    if not isinstance(payload, dict):
+        raise ValueError("search tool call must be a JSON object")
     if "function" in payload:
+        if not isinstance(payload["function"], dict):
+            raise ValueError("search tool call function must be a JSON object")
         payload = {
             "name": payload["function"].get("name"),
             "arguments": payload["function"].get("arguments", {}),
@@ -421,6 +425,8 @@ def _parse_tool_call(raw: str | dict[str, Any]) -> str:
     arguments = payload.get("arguments", {})
     if isinstance(arguments, str):
         arguments = json.loads(arguments)
+    if not isinstance(arguments, dict):
+        raise ValueError("search tool call arguments must be a JSON object")
     queries = arguments.get("query_list")
     if queries is None and isinstance(arguments.get("query"), str):
         queries = [arguments["query"]]

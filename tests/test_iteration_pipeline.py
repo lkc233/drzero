@@ -284,6 +284,20 @@ def test_malformed_generated_tool_call_marks_candidate_format_invalid(tmp_path):
     assert candidate_group_is_complete([candidate], verify_enabled=True)
 
 
+def test_evidence_extraction_rejects_json_array_tool_calls_as_format_errors():
+    with pytest.raises(ValueError, match="tool call must be a JSON object"):
+        extract_evidence_bundle(
+            "Seed evidence",
+            [
+                {
+                    "role": "assistant",
+                    "content": '<tool_call>["search", "bridge"]</tool_call>',
+                },
+            ],
+            hop_count=2,
+        )
+
+
 def test_rubric_scoring_and_reward_components():
     evaluations = [
         {"rubric_id": "r1", "score": 1, "reason": "low"},
@@ -1079,6 +1093,46 @@ def test_candidates_are_ranked_then_verified_until_first_pass():
         "not_verified",
     ]
     assert solver.calls == 18
+
+
+def test_candidate_group_rubrics_are_evaluated_concurrently():
+    rubrics = initial_rubrics()
+    candidates = [make_candidate(index) for index in range(5)]
+
+    class BarrierJudge:
+        def __init__(self):
+            self.started = 0
+            self.all_started = asyncio.Event()
+
+        async def complete_structured(self, prompt, response_model):
+            self.started += 1
+            if self.started == len(candidates):
+                self.all_started.set()
+            await asyncio.wait_for(self.all_started.wait(), timeout=0.2)
+            payload = {
+                "evaluations": [
+                    {"rubric_id": rubric.id, "score": 5, "reason": "supported"}
+                    for rubric in rubrics
+                ]
+            }
+            return response_model.model_validate(payload), json.dumps(payload), 0.0
+
+    winner, _, _ = asyncio.run(
+        rank_and_verify_candidates(
+            candidates,
+            rubrics,
+            BarrierJudge(),
+            ProblemVerifier(
+                TwoConditionSolver(
+                    with_evidence=["Final", "wrong", "wrong"],
+                    question_only=["wrong", "wrong", "wrong"],
+                ),
+                samples=3,
+            ),
+        )
+    )
+
+    assert winner == candidates[0]
 
 
 def test_all_semantic_verify_failures_return_no_selection_without_masking_errors():

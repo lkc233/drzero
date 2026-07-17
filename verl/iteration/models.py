@@ -549,27 +549,37 @@ async def rank_and_verify_candidates(
     verifier: ProblemVerifier,
 ) -> tuple[Candidate | None, list[Candidate], dict[str, str]]:
     raw_rubric_outputs: dict[str, str] = {}
+    eligible_candidates = [candidate for candidate in candidates if candidate.format_score > 0]
     for candidate in candidates:
         if candidate.format_score <= 0:
             candidate.status = "format_invalid"
-            continue
-        started = time.monotonic()
-        try:
-            rubric_evaluations, raw_output = await evaluate_rubrics(candidate, rubrics, judge_client)
+
+    rubric_started = {candidate.candidate_id: time.monotonic() for candidate in eligible_candidates}
+    rubric_outcomes = await asyncio.gather(
+        *(evaluate_rubrics(candidate, rubrics, judge_client) for candidate in eligible_candidates),
+        return_exceptions=True,
+    )
+    first_error: BaseException | None = None
+    for candidate, outcome in zip(eligible_candidates, rubric_outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            candidate.status = "rubric_error"
+            candidate.rubric_failure = {
+                "error_type": type(outcome).__name__,
+                "reason": str(outcome),
+                "latency_seconds": time.monotonic() - rubric_started[candidate.candidate_id],
+                "details": getattr(outcome, "details", {}),
+            }
+            if first_error is None:
+                first_error = outcome
+        else:
+            rubric_evaluations, raw_output = outcome
             candidate.rubric_evaluation = rubric_evaluations
             candidate.rubric_raw_output = raw_output
             candidate.rank_score = candidate_rank_score(candidate.format_score, rubric_evaluations)
             candidate.status = "ranked"
             raw_rubric_outputs[candidate.candidate_id] = raw_output
-        except Exception as error:
-            candidate.status = "rubric_error"
-            candidate.rubric_failure = {
-                "error_type": type(error).__name__,
-                "reason": str(error),
-                "latency_seconds": time.monotonic() - started,
-                "details": getattr(error, "details", {}),
-            }
-            raise
+    if first_error is not None:
+        raise first_error
 
     ordered = sorted(candidates, key=lambda item: (-item.rank_score, item.generation_index))
     selected: Candidate | None = None
