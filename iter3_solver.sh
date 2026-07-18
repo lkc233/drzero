@@ -4,6 +4,7 @@
 set -euo pipefail
 set -x
 source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" retriever
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/load_run_namespace.sh"
 
 export CUDA_VISIBLE_DEVICES="$SOLVER_GPU_DEVICES"
 export WANDB_MODE="${WANDB_MODE:-offline}"
@@ -37,14 +38,14 @@ model_name=$(basename "$model" | tr '[:upper:]' '[:lower:]')
 CONFIG_PATH="./config"
 TOOL_CONFIG="$CONFIG_PATH/search_tool_config.yaml"
 
-CHALLENGER_NAME="challenger_iter${cur_iter}_ratio${hop_ratio}_${challenger_algorithm}_group${challenger_grpo_group_size}-${challenger_reward_group_size}_${model_name}"
-SOLVER_NAME="solver_iter${cur_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}_${model_name}"
+CHALLENGER_NAME="challenger_iter${cur_iter}_ratio${hop_ratio}_${challenger_algorithm}_group${challenger_grpo_group_size}-${challenger_reward_group_size}_${model_name}${DRZERO_RUN_SUFFIX}"
+SOLVER_NAME="solver_iter${cur_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}_${model_name}${DRZERO_RUN_SUFFIX}"
 
 TRAIN_DATA="./data/zero_${CHALLENGER_NAME}.parquet"
 VAL_DATA="./data/test_musique.parquet"
 VAL_DATA_DIR="./data/${SOLVER_NAME}"
 
-RESUME_PATH="./checkpoints/dr-zero/solver_iter${prev_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}_${model_name}/solver_iter${prev_iter}_hf"
+RESUME_PATH="./checkpoints/dr-zero/solver_iter${prev_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}_${model_name}${DRZERO_RUN_SUFFIX}/solver_iter${prev_iter}_hf"
 
 
 source "$(dirname "${BASH_SOURCE[0]}")/.venv/bin/activate"
@@ -55,7 +56,8 @@ python -m verl.trainer.main_ppo \
     data.train_files="$TRAIN_DATA" \
     data.val_files="$VAL_DATA"  \
     data.train_batch_size=240 \
-    data.max_prompt_length=512 \
+    data.max_prompt_length=2048 \
+    data.max_response_length=3072 \
     algorithm.use_kl_in_reward=False \
     algorithm.adv_estimator=${algorithm} \
     actor_rollout_ref.model.path=$RESUME_PATH \

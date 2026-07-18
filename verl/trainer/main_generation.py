@@ -194,6 +194,14 @@ def _main_task(config):
         print(f"Using partition {partition}/5, from {start} to {end}")
 
     iteration_config = config.get("iteration", {})
+    document_limit = iteration_config.get("generation_document_limit")
+    if document_limit is not None:
+        document_limit = int(document_limit)
+        if document_limit <= 0:
+            raise ValueError("iteration.generation_document_limit must be positive")
+        dataset = dataset.iloc[:document_limit]
+        print(f"Limiting generation input to {len(dataset)} documents")
+
     state_path = iteration_config.get("state_path")
     verify_config = config.get("verify", {})
     verify_enabled = bool(verify_config.get("enabled", True))

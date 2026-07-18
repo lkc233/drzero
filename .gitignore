@@ -15,6 +15,8 @@ deploy/current.env
 /.ipynb_checkpoints/*
 .vscode/*
 /wandb/*
+/logs/
+/runs/
 .idea/*
 
 /data/*

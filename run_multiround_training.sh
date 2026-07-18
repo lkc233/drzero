@@ -5,14 +5,20 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/scripts/load_deployment_config.sh"
+source "$SCRIPT_DIR/scripts/load_run_namespace.sh"
 
 hop_ratio="${HOP_RATIO:-4321}"
 rounds="${ROUNDS:-3}"
 start_iteration="${START_ITERATION:-1}"
 start_stage="${START_STAGE:-challenger}"
-timing_log="${TRAINING_TIMING_LOG:-$SCRIPT_DIR/logs/training_timing.tsv}"
+mkdir -p "$DRZERO_LOG_DIR"
+timing_log="${TRAINING_TIMING_LOG:-$DRZERO_LOG_DIR/training_timing.tsv}"
 mkdir -p "$(dirname "$timing_log")"
+if [[ ! -e "$timing_log" ]]; then
+    printf 'iteration\tstage\tstarted_at\tfinished_at\telapsed_seconds\tstatus\n' > "$timing_log"
+fi
 export WANDB_MODE="${WANDB_MODE:-offline}"
+export TZ="${TRAINING_TIMEZONE:-Asia/Shanghai}"
 # Ray's local dashboard/runtime-env agents communicate over loopback and the
 # node address.  Bypass the cluster HTTP proxy for those local control-plane
 # requests; otherwise actor creation is sent to the compliance gateway.
@@ -37,12 +43,16 @@ run_timed_stage() {
     local iteration="$1"
     local stage="$2"
     shift 2
-    local started_at started_epoch finished_at finished_epoch elapsed_seconds status
+    local started_at started_epoch finished_at finished_epoch elapsed_seconds status stage_log
     started_at="$(date -Is)"
     started_epoch="$(date +%s)"
     echo "[$started_at] Starting iteration $iteration stage $stage"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$iteration" "$stage" "$started_at" "" "0" "RUNNING" \
+        >> "$timing_log"
+    stage_log="$DRZERO_LOG_DIR/iteration_${iteration}_${stage}.log"
     status=0
-    "$@" || status=$?
+    "$@" > >(tee -a "$stage_log") 2>&1 || status=$?
     finished_at="$(date -Is)"
     finished_epoch="$(date +%s)"
     elapsed_seconds=$((finished_epoch - started_epoch))
@@ -55,7 +65,7 @@ run_timed_stage() {
 
 start_local_judge() {
     tmux new-session -d -s qwen36 \
-        "cd '$SCRIPT_DIR' && set -o pipefail; GPU_DEVICES=${JUDGE_GPU_DEVICES:-0,1} JUDGE_PORT=${JUDGE_PORT:-8000} JUDGE_MODEL=${DRZERO_META_MODEL} JUDGE_TP_SIZE=${JUDGE_TP_SIZE:-2} bash setup_qwen36_judge.sh 2>&1 | tee -a logs/qwen36.log"
+        "cd '$SCRIPT_DIR' && set -o pipefail; GPU_DEVICES=${JUDGE_GPU_DEVICES:-0,1} JUDGE_PORT=${JUDGE_PORT:-8000} JUDGE_MODEL=${DRZERO_META_MODEL} JUDGE_TP_SIZE=${JUDGE_TP_SIZE:-2} bash setup_qwen36_judge.sh 2>&1 | tee -a '$DRZERO_LOG_DIR/judge.log'"
     scripts/check_deployment_services.sh judge
     judge_stopped_for_solver=false
 }

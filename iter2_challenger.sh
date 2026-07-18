@@ -4,6 +4,7 @@
 set -euo pipefail
 set -x
 source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" judge
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/load_run_namespace.sh"
 
 export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-2,3,4,5,6,7}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
@@ -42,10 +43,10 @@ TRAIN_DATA="./data/zero_ratio${hop_ratio}.parquet"
 VAL_DATA="./data/test.parquet"
 
 SOLVER_NAME="solver_iter${prev_iter}_hf"
-CHALLENGER_NAME="challenger_iter${cur_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}"
-SOLVER_PATH="./checkpoints/dr-zero/solver_iter${prev_iter}_ratio${hop_ratio}_${solver_algorithm}_group${solver_grpo_group_size}_${model_name}/${SOLVER_NAME}"
-RESUME_PATH="./checkpoints/dr-zero/challenger_iter${prev_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}/global_step_50"
-STATE="./iterations/iter_${cur_iter}/state.json"
+CHALLENGER_NAME="challenger_iter${cur_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}${DRZERO_RUN_SUFFIX}"
+SOLVER_PATH="./checkpoints/dr-zero/solver_iter${prev_iter}_ratio${hop_ratio}_${solver_algorithm}_group${solver_grpo_group_size}_${model_name}${DRZERO_RUN_SUFFIX}/${SOLVER_NAME}"
+RESUME_PATH="./checkpoints/dr-zero/challenger_iter${prev_iter}_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}${DRZERO_RUN_SUFFIX}/global_step_50"
+STATE="${DRZERO_ITERATION_ROOT}/iter_${cur_iter}/state.json"
 export DRZERO_ITERATION_STATE="$STATE"
 
 

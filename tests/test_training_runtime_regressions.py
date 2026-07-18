@@ -37,7 +37,8 @@ def test_multiround_pipeline_can_resume_at_solver_then_run_later_rounds():
 def test_multiround_pipeline_records_each_stage_timing():
     script = Path("run_multiround_training.sh").read_text()
 
-    assert 'timing_log="${TRAINING_TIMING_LOG:-$SCRIPT_DIR/logs/training_timing.tsv}"' in script
+    assert 'timing_log="${TRAINING_TIMING_LOG:-$DRZERO_LOG_DIR/training_timing.tsv}"' in script
+    assert '"0" "RUNNING"' in script
     for stage in ("challenger", "data_generation", "solver", "convert", "full_test", "update_state"):
         assert f'run_timed_stage "$iteration" {stage}' in script
     assert 'elapsed_seconds=$((finished_epoch - started_epoch))' in script
@@ -46,13 +47,49 @@ def test_multiround_pipeline_records_each_stage_timing():
 def test_solver_full_evaluation_uses_the_complete_test_set():
     script = Path("evaluate_solver.sh").read_text()
 
+    assert 'export WANDB_MODE="${WANDB_MODE:-offline}"' in script
     assert 'test_data="${SOLVER_TEST_DATA:-./data/test_sampled.parquet}"' in script
     assert 'data.val_files="$test_data"' in script
+    assert "data.max_prompt_length=2048" in script
+    assert "data.max_response_length=3072" in script
     assert 'trainer.val_only=True' in script
+    assert 'algorithm.adv_estimator=grpo' in script
+    assert 'actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4' in script
+    assert 'actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4' in script
     assert 'actor_rollout_ref.rollout.n=1' in script
     assert 'actor_rollout_ref.rollout.val_kwargs.n=1' in script
     assert 'gpu_count="$(awk -F, \'{print NF}\' <<<"$CUDA_VISIBLE_DEVICES")"' in script
     assert 'trainer.n_gpus_per_node="$gpu_count"' in script
+
+
+def test_challenger_and_solver_rollouts_use_2048_plus_3072_context():
+    config = OmegaConf.load("config/search_multiturn_grpo.yaml")
+
+    assert config.data.max_prompt_length == 2048
+    assert config.data.max_response_length == 3072
+
+    rollout_config = OmegaConf.load("verl/trainer/config/rollout/rollout.yaml")
+    assert rollout_config.max_model_len == 5120
+    assert rollout_config.max_num_batched_tokens == 5120
+
+    for iteration in range(1, 4):
+        challenger_script = Path(f"iter{iteration}_challenger.sh").read_text()
+        solver_script = Path(f"iter{iteration}_solver.sh").read_text()
+
+        assert "search_multiturn_grpo" in challenger_script
+        assert "data.max_prompt_length=2048" in solver_script
+        assert "data.max_response_length=3072" in solver_script
+
+
+def test_generation_uses_20000_documents_and_3072_response_tokens():
+    config = OmegaConf.load("config/search_multiturn_grpo.yaml")
+
+    assert config.iteration.generation_document_limit == 20000
+    assert config.iteration.candidate_count_per_document == 5
+
+    for iteration in range(1, 4):
+        script = Path(f"iter{iteration}_gen_data.sh").read_text()
+        assert "actor_rollout_ref.rollout.response_length=3072" in script
 
 
 def test_standalone_worker_receives_environment_before_base_init(monkeypatch):

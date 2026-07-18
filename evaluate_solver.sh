@@ -5,11 +5,13 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root"
 source .venv/bin/activate
 source scripts/load_deployment_config.sh
+source scripts/load_run_namespace.sh
+export WANDB_MODE="${WANDB_MODE:-offline}"
 
 iteration="${1:?usage: evaluate_solver.sh ITERATION [HOP_RATIO]}"
 hop_ratio="${2:-4321}"
 model_name="${MODEL_NAME:-qwen3-4b-instruct-2507}"
-experiment="solver_iter${iteration}_ratio${hop_ratio}_grpo_group5_${model_name}"
+experiment="solver_iter${iteration}_ratio${hop_ratio}_grpo_group5_${model_name}${DRZERO_RUN_SUFFIX}"
 solver_dir="./checkpoints/dr-zero/${experiment}/solver_iter${iteration}_hf"
 test_data="${SOLVER_TEST_DATA:-./data/test_sampled.parquet}"
 output_dir="${SOLVER_TEST_OUTPUT_DIR:-./data/${experiment}_full_test}"
@@ -35,15 +37,19 @@ python -m verl.trainer.main_ppo \
     data.train_files="$test_data" \
     data.val_files="$test_data" \
     data.val_batch_size="${SOLVER_TEST_BATCH_SIZE:-256}" \
-    data.max_prompt_length=512 \
+    data.max_prompt_length=2048 \
+    data.max_response_length=3072 \
+    algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
     actor_rollout_ref.model.path="$solver_dir" \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.rollout.n=1 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.name=sglang \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.tensor_model_parallel_size="$tp_size" \
     actor_rollout_ref.rollout.multi_turn.tool_config_path="$root/config/search_tool_config.yaml" \
@@ -56,3 +62,7 @@ python -m verl.trainer.main_ppo \
     trainer.val_before_train=True \
     trainer.val_only=True \
     trainer.validation_data_dir="$output_dir"
+
+python scripts/summarize_solver_evaluation.py \
+    "$output_dir/0.jsonl" \
+    "$output_dir/results.md"

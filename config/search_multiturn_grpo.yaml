@@ -19,7 +19,7 @@ data:
   # prompt makes per-DP-worker prompt tensors differ and DataProto.concat fails. The
   # tool schema adds ~40 tokens, so 2048 leaves ample headroom and keeps padding uniform.
   max_prompt_length: 2048
-  max_response_length: 2560
+  max_response_length: 3072
   train_batch_size: 256
   return_raw_chat: True
   shuffle: False
@@ -36,6 +36,7 @@ data:
 iteration:
   state_path: ${oc.env:DRZERO_ITERATION_STATE,null}
   candidate_count_per_document: 5
+  generation_document_limit: 20000
   solver_train_ratio: 0.9
   split_seed: 42
 

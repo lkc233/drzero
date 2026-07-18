@@ -4,6 +4,7 @@
 set -euo pipefail
 set -x
 source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" all
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/load_run_namespace.sh"
 
 export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_DEVICES:-2,3,4,5,6,7}"
 
@@ -31,15 +32,15 @@ prev_iter=1
 solver_algorithm=grpo
 solver_grpo_group_size=5
 SOLVER_NAME="solver_iter${prev_iter}_hf"
-SOLVER_PATH="./checkpoints/dr-zero/solver_iter${prev_iter}_ratio${hop_ratio}_${solver_algorithm}_group${solver_grpo_group_size}_${model_name}/${SOLVER_NAME}"
-STATE="./iterations/iter_${cur_iter}/state.json"
+SOLVER_PATH="./checkpoints/dr-zero/solver_iter${prev_iter}_ratio${hop_ratio}_${solver_algorithm}_group${solver_grpo_group_size}_${model_name}${DRZERO_RUN_SUFFIX}/${SOLVER_NAME}"
+STATE="${DRZERO_ITERATION_ROOT}/iter_${cur_iter}/state.json"
 export DRZERO_ITERATION_STATE="$STATE"
 
 challenger_step=100
 data_partition=2
 
 EXP_DIR="checkpoints/dr-zero"
-MODEL_PATH="challenger_iter2_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}"
+MODEL_PATH="challenger_iter2_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}${DRZERO_RUN_SUFFIX}"
 CKPT_PATH="${EXP_DIR}/${MODEL_PATH}/global_step_${challenger_step}"
 
 CONFIG_PATH="./config"
@@ -72,7 +73,7 @@ python -m verl.trainer.main_generation \
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.top_p=1.0 \
     actor_rollout_ref.rollout.prompt_length=1536 \
-    actor_rollout_ref.rollout.response_length=2560 \
+    actor_rollout_ref.rollout.response_length=3072 \
     actor_rollout_ref.rollout.max_num_batched_tokens=65536 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${tp} \
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_memory_utilization} \

@@ -4,6 +4,7 @@
 set -eo pipefail
 set -x
 source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" all
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/load_run_namespace.sh"
 
 # --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
 export CC=/usr/bin/gcc
@@ -81,9 +82,9 @@ if [ $# -ge 1 ]; then
     shift
 fi
 
-LOG_DIR="$(pwd)/logs"
+LOG_DIR="$DRZERO_LOG_DIR"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/iter1_gen_data_ratio${hop_ratio}_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="$LOG_DIR/iteration_1_generate_data_detail.log"
 
 algorithm=grpo_batch
 grpo_group_size=1
@@ -93,14 +94,14 @@ model_name=$(basename "$model" | tr '[:upper:]' '[:lower:]')
 
 # Frozen iteration state produced by iter1_challenger.sh; used for skills injection
 # during generation and for verify (round-start solver).
-STATE="./iterations/iter_1/state.json"
+STATE="${DRZERO_ITERATION_ROOT}/iter_1/state.json"
 export DRZERO_ITERATION_STATE="$STATE"
 
 challenger_step=50
 data_partition=1
 
 EXP_DIR="checkpoints/dr-zero"
-MODEL_PATH="challenger_iter1_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}"
+MODEL_PATH="challenger_iter1_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}${DRZERO_RUN_SUFFIX}"
 CKPT_PATH="${EXP_DIR}/${MODEL_PATH}/global_step_${challenger_step}"
 MERGED_MODEL_PATH="${CKPT_PATH}/merged_hf"
 MERGE_COMPLETE="${MERGED_MODEL_PATH}/.merge_complete"
@@ -152,7 +153,7 @@ COMMON_OVERRIDES=(
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=1.0
     actor_rollout_ref.rollout.prompt_length=2048
-    actor_rollout_ref.rollout.response_length=2560
+    actor_rollout_ref.rollout.response_length=3072
     actor_rollout_ref.rollout.max_num_batched_tokens=65536
     actor_rollout_ref.rollout.tensor_model_parallel_size="$generation_tp"
     actor_rollout_ref.rollout.gpu_memory_utilization="$rollout_memory_utilization"

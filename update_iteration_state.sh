@@ -7,15 +7,16 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root"
 source .venv/bin/activate
 source scripts/load_deployment_config.sh
+source scripts/load_run_namespace.sh
 
 model_name="${MODEL_NAME:-qwen3-4b-instruct-2507}"
 solver_name="solver_iter${iteration}_hf"
-solver_dir="./checkpoints/dr-zero/solver_iter${iteration}_ratio${hop_ratio}_grpo_group5_${model_name}/${solver_name}"
-challenger_name="challenger_iter${iteration}_ratio${hop_ratio}_grpo_batch_group1-5_${model_name}"
+solver_dir="./checkpoints/dr-zero/solver_iter${iteration}_ratio${hop_ratio}_grpo_group5_${model_name}${DRZERO_RUN_SUFFIX}/${solver_name}"
+challenger_name="challenger_iter${iteration}_ratio${hop_ratio}_grpo_batch_group1-5_${model_name}${DRZERO_RUN_SUFFIX}"
 data_prefix="./data/zero_${challenger_name}"
-state="./iterations/iter_${iteration}/state.json"
-next_state="./iterations/iter_$((iteration + 1))/state.json"
-artifact_dir="./iterations/iter_${iteration}/update"
+state="${DRZERO_ITERATION_ROOT}/iter_${iteration}/state.json"
+next_state="${DRZERO_ITERATION_ROOT}/iter_$((iteration + 1))/state.json"
+artifact_dir="${DRZERO_ITERATION_ROOT}/iter_${iteration}/update"
 mkdir -p "$artifact_dir"
 
 candidates="${data_prefix}.candidates.jsonl"

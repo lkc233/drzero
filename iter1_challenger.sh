@@ -4,6 +4,7 @@
 set -euo pipefail
 set -x
 source "$(dirname "${BASH_SOURCE[0]}")/scripts/init_deployment.sh" judge
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/load_run_namespace.sh"
 
 # --- Environment (ported from drzero_v0: fixes Triton/flashinfer compilation) ---
 export CC=/usr/bin/gcc
@@ -41,10 +42,9 @@ if [ $# -ge 1 ]; then
     shift
 fi
 
-# Log to logs/ like drzero_v0
-LOG_DIR="$(pwd)/logs"
+LOG_DIR="$DRZERO_LOG_DIR"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/iter1_challenger_ratio${hop_ratio}_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="$LOG_DIR/iteration_1_challenger_detail.log"
 
 algorithm=grpo_batch
 grpo_group_size=1
@@ -62,7 +62,7 @@ VAL_DATA="./data/test.parquet"
 
 # --- Dr.Zero iteration state (frozen skills/rubrics) for the rubric reward ---
 # Rubric reward uses the standalone local Qwen3.6 service configured by meta_model.
-STATE="./iterations/iter_1/state.json"
+STATE="${DRZERO_ITERATION_ROOT}/iter_1/state.json"
 export DRZERO_ITERATION_STATE="$STATE"
 if [ ! -f "$STATE" ]; then
     python -m verl.iteration.cli init-state \
@@ -120,7 +120,7 @@ python -m verl.trainer.main_ppo \
     iteration.state_path="$STATE" \
     trainer.logger='["wandb", "console"]' \
     trainer.project_name="dr-zero" \
-    trainer.experiment_name="challenger_iter1_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}" \
+    trainer.experiment_name="challenger_iter1_ratio${hop_ratio}_${algorithm}_group${grpo_group_size}-${reward_group_size}_${model_name}${DRZERO_RUN_SUFFIX}" \
     trainer.n_gpus_per_node=${gpus} \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
